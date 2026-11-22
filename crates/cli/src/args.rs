@@ -1,0 +1,1112 @@
+//! What `vythea` was asked for on the command line.
+
+use vythea_core::gate::Mode;
+use vythea_core::memory::{Saving, Scope};
+
+pub const HELP: &str = "\
+Vythea — a small agent in your terminal
+
+  vythea                 open a conversation
+  vythea -p \"question\"    ask once and exit
+  vythea --continue      pick up this folder's most recent session
+  vythea --resume        choose from the recent sessions
+  vythea --resume <id>   open that session, by the id /where shows
+  vythea --bg \"task\"     work on it in the background, terminal closed
+  vythea sessions        what is working in the background
+  vythea attach <id>     watch one, and answer what it asks
+  vythea logs <id>       what a session has done so far
+  vythea stop <id>       stop one working in the background
+  vythea gui             open the window instead
+  vythea serve           answer chat apps and run schedules, no window
+  vythea setup           name, sign in, provider, model, install
+  vythea update          install the newest version
+  vythea doctor          check the setup, the disk and the gateway
+  vythea cloud           run a task on Vythea's servers (Pro)
+  vythea wallet          the wallet the agent pays from, and its limits
+  vythea local           models that run on this computer: get one, or add
+                           one from a Hugging Face link
+  vythea mcp             add, list, get or remove MCP servers
+  vythea mcp serve       offer the browser, media and search tools over MCP
+  vythea acp             serve an editor over the Agent Client Protocol
+  vythea --uninstall     take it off again
+
+Options
+  -p, --print <prompt>     ask one question, print the answer, exit
+  -c, --continue           resume this folder's most recent session
+  -r, --resume [id]        choose a session, or open the one with this id
+      --fork-session       with -c or -r <id>: carry on in a copy of it,
+                           leaving that session as it was
+      --name <name>        name the session, new or carried on
+      --bg                 work in the background: says the session's id
+                           and leaves it working with the terminal closed
+      --worktree           work in a git worktree of its own, on a branch
+                           made from HEAD, leaving your checkout alone
+      --mode <mode>        how much runs without asking: default, accept-edits,
+                           plan, auto, dont-ask or bypass
+      --yes                --mode bypass: run tools without asking, bar risky ones
+      --plan               --mode plan: read and search only; never change files
+      --model <id>         this session's model, leaving the default as it is
+      --gateway <name>     the gateway that model is on
+      --effort <level>     how hard it thinks in this session, or auto
+      --memory <when>      when this session saves to memory: when-asked,
+                           ask (a yes for each save) or auto
+      --memory-scope <where>
+                           where it keeps memory and what of it it loads:
+                           auto (everywhere), project or chat
+      --private            a new private chat: only its own notes load, and
+                           it saves to them only when asked
+      --system-prompt <text>
+                           this run's instructions in place of Vythea's
+                           own; the project's, the skills and memory still
+                           load
+      --system-prompt-file <file>
+                           the same, read from a file
+      --append-system-prompt <text>
+                           instructions this run adds after all the rest
+      --append-system-prompt-file <file>
+                           the same, read from a file
+      --add-dir <folder>   a folder the session reads and changes as it does
+                           the project, for this run; once per folder
+      --offline            with doctor: leave the network alone
+      --dump-config        print the settings and limits a -p run in a new
+                           session gets with the same flags, as JSON
+  -h, --help               this
+  -V, --version            which version this is
+
+With -p
+      --output <form>      text (the answer), json, or stream-json
+      --max-rounds <n>     tool rounds a message gets before it stops (100)
+      --model <name>       use this model instead of the one set up
+      --tools <a,b>        only these tools, by name
+      --budget <tokens>    stop once this many tokens are spent, over every
+                           message the run is sent
+      --input-format <form>
+                           text (the question), or stream-json: messages,
+                           interrupts and answers as JSON lines on stdin
+      --permission-prompt-tool stdio
+                           with stream-json in, ask stdin about each call
+                           that needs a yes
+  VYTHEA_DEADLINE=<s>    in the environment, the seconds a question may
+                           take, or with stream-json in the whole run: at 80%
+                           it is told to write its outputs, and at the end it
+                           stops
+      --json-schema <file>
+                           answer in JSON this schema checks, printed alone,
+                           or as \"value\" with --output json; the schema
+                           itself can stand in for the file; a new session
+                           only, so not with -c, -r or stream-json in
+
+With -p, and in the terminal with VYTHEA_DISPOSABLE=1, from the
+environment, saving none of it
+  AGENT_BASE_URL           ask this OpenAI-compatible server instead of the
+                           gateway set up, unless --gateway names one
+  AGENT_API_KEY            the key to send it
+  AGENT_MODEL              the model to ask, unless --model names one
+  VYTHEA_PROMPT_RULES    rules to leave out of the system prompt of a run
+                           nobody watches, as -compute,-done, for measuring
+                           what each is worth; a wrong id stops the run and
+                           lists them
+";
+
+/// What to open with.
+#[derive(Debug, PartialEq)]
+pub enum Start {
+    /// A session of its own.
+    Fresh,
+    /// The one used last, without being asked.
+    Last,
+    /// Pick from the recent ones.
+    Choose,
+    /// A named one, by the id in its file name.
+    Named(u64),
+}
+
+/// What `vythea sessions`, `attach`, `logs` and `stop` look at.
+#[derive(Debug, PartialEq)]
+pub enum Runs {
+    List,
+    Attach(u64),
+    Logs(u64),
+    Stop(u64),
+}
+
+/// How `-p` gives its answer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Output {
+    /// The answer alone, as it would read in a conversation.
+    Text,
+    /// One JSON object with the answer and what it took.
+    Json,
+    /// A JSON line each time the run moves on, then that object as the last line.
+    StreamJson,
+}
+
+/// Where `-p` takes what to say from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Input {
+    /// The question after `-p`.
+    Text,
+    /// JSON lines on stdin: messages, interrupts and answers to approvals.
+    StreamJson,
+}
+
+pub struct Args {
+    pub prompt: Option<String>,
+    pub start: Start,
+    /// The mode from `--mode`, `--yes` or `--plan`, or why `--mode` named
+    /// none.
+    pub mode: Result<Mode, String>,
+    /// Whether one of those flags picked it: without one, the terminal
+    /// starts in the mode the window starts sessions in.
+    pub mode_picked: bool,
+    /// The session's own model, gateway and effort, for this run and after.
+    pub model: Option<String>,
+    pub gateway: Option<String>,
+    pub effort: Option<String>,
+    pub help: bool,
+    pub version: bool,
+    pub gui: bool,
+    /// `vythea serve`: the chat apps and the schedules, with no window.
+    pub serve: bool,
+    pub install: bool,
+    pub uninstall: bool,
+    pub update: bool,
+    pub doctor: bool,
+    pub offline: bool,
+    pub output: Output,
+    pub input: Input,
+    /// Whether a call that needs a yes is asked about on stdout and answered
+    /// on stdin, from `--permission-prompt-tool stdio`.
+    pub ask_stdio: bool,
+    pub max_rounds: Option<usize>,
+    pub tools: Option<Vec<String>>,
+    pub budget: Option<u64>,
+    /// The words after `vythea mcp`, which manage MCP servers.
+    pub mcp: Option<Vec<String>>,
+    /// `vythea cloud ...`: the words after it.
+    pub cloud: Option<Vec<String>>,
+    /// `vythea wallet ...`: the words after it.
+    pub wallet: Option<Vec<String>>,
+    /// `vythea local ...`: the words after it.
+    pub local: Option<Vec<String>>,
+    /// `vythea acp`: speak the Agent Client Protocol on stdin and stdout.
+    pub acp: bool,
+    /// `vythea acp --phone`: the same for the phone app, which the window
+    /// starts for each paired phone (core's `phone`).
+    pub acp_phone: bool,
+    /// `--dump-config`: print what a `-p` run with these flags would get
+    /// instead of running one.
+    pub dump_config: bool,
+    /// The answer's JSON Schema from `--json-schema`: a file's path, or the
+    /// schema itself.
+    pub schema: Option<String>,
+    /// `--worktree`: the new session works in a git worktree of its own.
+    pub worktree: bool,
+    /// When the session saves to memory, from `--memory`.
+    pub memory: Option<Saving>,
+    /// Where it keeps memory and what of it loads, from `--memory-scope`.
+    pub memory_scope: Option<Scope>,
+    /// `--private`: the new session is a private chat.
+    pub private: bool,
+    /// `--name`: what to call the session.
+    pub name: Option<String>,
+    /// `--fork-session`: carry on in a copy of the session continued or
+    /// resumed.
+    pub fork: bool,
+    /// This run's instructions in place of Vythea's own, from
+    /// `--system-prompt` or the file `--system-prompt-file` names.
+    pub system_prompt: Option<String>,
+    /// Instructions this run adds after all the rest, from
+    /// `--append-system-prompt` or `--append-system-prompt-file`.
+    pub append_system_prompt: Option<String>,
+    /// `--bg`: start the run in a process of its own and return.
+    pub bg: bool,
+    /// Set in that process: the token its starter finds its record by.
+    pub background: Option<String>,
+    /// `vythea sessions`, `attach`, `logs` or `stop`.
+    pub runs: Option<Runs>,
+    /// The folders `--add-dir` named, as typed, to add beside the project.
+    pub add_dirs: Vec<String>,
+}
+
+pub fn parse(raw: impl Iterator<Item = String>) -> Result<Args, String> {
+    let mut raw = raw.peekable();
+    let mut print = false;
+    let (mut mode, mut yes, mut plan) = (None, false, false);
+    let mut args = Args {
+        prompt: None,
+        start: Start::Fresh,
+        mode: Ok(Mode::Default),
+        mode_picked: false,
+        model: None,
+        gateway: None,
+        effort: None,
+        help: false,
+        version: false,
+        gui: false,
+        serve: false,
+        install: false,
+        uninstall: false,
+        update: false,
+        doctor: false,
+        offline: false,
+        output: Output::Text,
+        input: Input::Text,
+        ask_stdio: false,
+        max_rounds: None,
+        tools: None,
+        budget: None,
+        mcp: None,
+        cloud: None,
+        wallet: None,
+        local: None,
+        acp: false,
+        acp_phone: false,
+        dump_config: false,
+        schema: None,
+        worktree: false,
+        memory: None,
+        memory_scope: None,
+        private: false,
+        name: None,
+        fork: false,
+        system_prompt: None,
+        append_system_prompt: None,
+        bg: false,
+        background: None,
+        runs: None,
+        add_dirs: Vec::new(),
+    };
+    // Only as the first word, so `-p mcp` still asks about it.
+    if raw.next_if(|first| first == "mcp").is_some() {
+        args.mcp = Some(raw.collect());
+        return Ok(args);
+    }
+    if raw.next_if(|first| first == "cloud").is_some() {
+        args.cloud = Some(raw.collect());
+        return Ok(args);
+    }
+    if raw.next_if(|first| first == "wallet").is_some() {
+        args.wallet = Some(raw.collect());
+        return Ok(args);
+    }
+    if raw.next_if(|first| first == "local").is_some() {
+        args.local = Some(raw.collect());
+        return Ok(args);
+    }
+    // Only as the first word, so `vythea "stop the server"` still asks.
+    if let Some(verb) = raw.next_if(|first| RUNS.contains(&first.as_str())) {
+        let id = raw.next().and_then(|id| id.parse().ok());
+        let named = |id: Option<u64>| {
+            id.ok_or(format!(
+                "vythea {verb} takes a session id, like vythea {verb} 42; vythea sessions lists them."
+            ))
+        };
+        args.runs = Some(match verb.as_str() {
+            "attach" => Runs::Attach(named(id)?),
+            "logs" => Runs::Logs(named(id)?),
+            "stop" => Runs::Stop(named(id)?),
+            _ => Runs::List,
+        });
+        return Ok(args);
+    }
+    // Only as the first word too, since an editor starts it with nothing
+    // after and `vythea acp` anywhere else is a question about it.
+    if raw.next_if(|first| first == "acp").is_some() {
+        args.acp = true;
+        args.acp_phone = raw.next_if(|next| next == "--phone").is_some();
+        return Ok(args);
+    }
+    while let Some(arg) = raw.next() {
+        match arg.as_str() {
+            "gui" => args.gui = true,
+            "serve" => args.serve = true,
+            "update" => args.update = true,
+            "doctor" => args.doctor = true,
+            "--offline" => args.offline = true,
+            "--dump-config" => args.dump_config = true,
+            // A flag straight after, short or long, is not the question, so
+            // `-p --output json "what is this"` and `-p -c "what is this"`
+            // take the bare word after it. A flag is one word, so a question
+            // can still start with a dash, as in `-p "-5 or 5?"`.
+            "-p" | "--print" => {
+                print = true;
+                let flag = |next: &String| next.starts_with('-') && !next.contains(' ');
+                if raw.peek().is_some_and(|next| !flag(next)) {
+                    args.prompt = raw.next();
+                }
+            }
+            "-c" | "--continue" => args.start = Start::Last,
+            "--worktree" => args.worktree = true,
+            // `--resume` on its own offers the recent sessions; with an id it
+            // opens that one, which is what the id in `/where` is for. Any
+            // other word is refused rather than dropped, which left `-p` to
+            // answer in a new session as if nothing was wrong.
+            "-r" | "--resume" => {
+                args.start = match raw.next_if(|next| !next.starts_with('-')) {
+                    Some(id) => Start::Named(
+                        id.parse()
+                            .map_err(|_| "--resume takes a session id, like --resume 42.")?,
+                    ),
+                    None => Start::Choose,
+                }
+            }
+            "--mode" => mode = Some(Mode::parse(&raw.next().unwrap_or_default())),
+            "--yes" => yes = true,
+            "--plan" => plan = true,
+            "--output" => {
+                args.output = match raw.next().as_deref() {
+                    Some("text") => Output::Text,
+                    Some("json") => Output::Json,
+                    Some("stream-json") => Output::StreamJson,
+                    _ => return Err("--output takes text, json or stream-json.".into()),
+                }
+            }
+            "--input-format" => {
+                args.input = match raw.next().as_deref() {
+                    Some("text") => Input::Text,
+                    Some("stream-json") => Input::StreamJson,
+                    _ => return Err("--input-format takes text or stream-json.".into()),
+                }
+            }
+            // Named as other agents' command lines name it, so a program that
+            // drives one of them needs fewer changes to drive this; stdio is
+            // the only way to ask.
+            "--permission-prompt-tool" => match raw.next().as_deref() {
+                Some("stdio") => args.ask_stdio = true,
+                _ => return Err("--permission-prompt-tool takes stdio.".into()),
+            },
+            "--max-rounds" => {
+                args.max_rounds = Some(above_zero(
+                    raw.next(),
+                    "--max-rounds takes a number of tool rounds above 0, like --max-rounds 10.",
+                )?)
+            }
+            "--model" => {
+                let name = raw
+                    .next()
+                    .filter(|name| !name.is_empty() && !name.starts_with('-'));
+                args.model = Some(name.ok_or("--model takes the name of a model.")?);
+            }
+            "--tools" => args.tools = Some(tool_names(raw.next())?),
+            "--budget" => {
+                args.budget = Some(above_zero(
+                    raw.next(),
+                    "--budget takes a number of tokens above 0, like --budget 200000.",
+                )?)
+            }
+            "--json-schema" => {
+                let schema = raw
+                    .next()
+                    .filter(|schema| !schema.is_empty() && !schema.starts_with('-'));
+                args.schema = Some(schema.ok_or(
+                    "--json-schema takes a JSON Schema file, like --json-schema answer.json.",
+                )?);
+            }
+            "--memory" => {
+                args.memory = Some(Saving::parse(&raw.next().unwrap_or_default())?);
+            }
+            "--memory-scope" => {
+                args.memory_scope = Some(Scope::parse(&raw.next().unwrap_or_default())?);
+            }
+            "--private" => args.private = true,
+            "--fork-session" => args.fork = true,
+            "--name" => {
+                let name = raw.next().map(|name| name.trim().to_owned());
+                let name = name.filter(|name| !name.is_empty() && !name.starts_with('-'));
+                args.name = Some(name.ok_or("--name takes what to call the session.")?);
+            }
+            "--system-prompt"
+            | "--system-prompt-file"
+            | "--append-system-prompt"
+            | "--append-system-prompt-file" => {
+                let text = given_prompt(&arg, raw.next())?;
+                let (slot, flag) = match arg.starts_with("--append") {
+                    true => (&mut args.append_system_prompt, "--append-system-prompt"),
+                    false => (&mut args.system_prompt, "--system-prompt"),
+                };
+                // As text or from a file, never both: one would quietly win.
+                if slot.replace(text).is_some() {
+                    return Err(format!(
+                        "{flag} was given twice; give it once, as text or with {flag}-file."
+                    ));
+                }
+            }
+            "--bg" => args.bg = true,
+            // Not in --help: only `--bg` starts a run with it.
+            "--background" => {
+                args.background = Some(raw.next().ok_or("--background takes a token.")?);
+            }
+            // One folder a flag, as a bare word after them is the question.
+            "--add-dir" => args.add_dirs.push(
+                raw.next()
+                    .filter(|folder| !folder.trim().is_empty() && !folder.starts_with('-'))
+                    .ok_or("--add-dir takes a folder, like --add-dir ../shared.")?,
+            ),
+            "--gateway" => args.gateway = raw.next(),
+            "--effort" => args.effort = raw.next(),
+            "setup" | "--install" => args.install = true,
+            "--uninstall" => args.uninstall = true,
+            "-h" | "--help" => args.help = true,
+            "-V" | "--version" => args.version = true,
+            // A bare word is the prompt, so `vythea "what is this"` works.
+            other if !other.starts_with('-') && args.prompt.is_none() => {
+                args.prompt = Some(other.to_owned())
+            }
+            // Once ignored: a mistyped flag ran with the defaults, and the
+            // word after it became the question.
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown option {other}; see vythea --help."));
+            }
+            // Once ignored too, so `-p what is this` asked "what" alone.
+            other => {
+                return Err(format!(
+                    "`{other}` came after the question; a question of more than one word goes in quotes, like -p \"what is this\"."
+                ));
+            }
+        }
+    }
+    args.mode_picked = mode.is_some() || yes || plan;
+    args.mode = picked(mode, yes, plan);
+    // A chat carried on keeps what it chose; `/remember` changes that.
+    if args.private && args.start != Start::Fresh {
+        return Err(
+            "--private starts a new chat, so it does not go with --continue or --resume.".into(),
+        );
+    }
+    // The list to choose from comes after the window is taken, too late to
+    // copy what is picked from it before anything runs.
+    if args.fork && !matches!(args.start, Start::Last | Start::Named(_)) {
+        return Err(
+            "--fork-session copies the session carried on, so it goes with --continue or --resume <id>."
+                .into(),
+        );
+    }
+    // A session carried on keeps the folder it had, worktree or not.
+    if args.worktree && args.start != Start::Fresh {
+        return Err(
+            "--worktree starts a new session, so it does not go with --continue or --resume."
+                .into(),
+        );
+    }
+    let streamed = args.input == Input::StreamJson;
+    if args.bg && args.prompt.is_none() {
+        return Err("--bg takes what to do, like vythea --bg \"fix the flaky test\".".into());
+    }
+    // Nobody reads what it prints, and the list to choose from has nobody
+    // to choose.
+    if args.bg && (args.output != Output::Text || streamed || args.schema.is_some()) {
+        return Err(
+            "--bg works on its own, so it takes no --output, --input-format or --json-schema."
+                .into(),
+        );
+    }
+    if args.bg && args.start == Start::Choose {
+        return Err("With --bg, --resume takes a session id, like --resume 42.".into());
+    }
+    if streamed && !print {
+        return Err("--input-format stream-json only works with -p.".into());
+    }
+    if streamed && args.prompt.is_some() {
+        return Err(
+            "With --input-format stream-json the messages come on stdin, so -p takes no question."
+                .into(),
+        );
+    }
+    if streamed && args.output != Output::StreamJson {
+        return Err("--input-format stream-json needs --output stream-json.".into());
+    }
+    if args.ask_stdio && !streamed {
+        return Err(
+            "--permission-prompt-tool stdio needs --input-format stream-json, which carries the answers."
+                .into(),
+        );
+    }
+    if print && args.prompt.is_none() && !streamed {
+        return Err("-p takes the question, like -p \"what is this\".".into());
+    }
+    // The list to choose from is only shown in a conversation; `-p` would
+    // answer in a new session instead.
+    if args.once() && args.start == Start::Choose {
+        return Err("With -p, --resume takes a session id, like --resume 42.".into());
+    }
+    let shaped = args.output != Output::Text
+        || args.max_rounds.is_some()
+        || args.tools.is_some()
+        || args.budget.is_some();
+    // The dump says what they would come to, so it takes them without -p.
+    if shaped && !args.once() && !args.dump_config {
+        return Err("--output, --max-rounds, --tools and --budget only work with -p.".into());
+    }
+    // It reads the model from the settings and the flags, not from a
+    // session that has one of its own.
+    if args.dump_config && args.start != Start::Fresh {
+        return Err(
+            "--dump-config describes a new session, so it takes no --continue or --resume.".into(),
+        );
+    }
+    if args.schema.is_some() && !args.once() {
+        return Err("--json-schema only works with -p.".into());
+    }
+    // The driver counts an answer's two corrections over the whole
+    // transcript, so on a session with earlier turns the answers turned down
+    // in those would use them up.
+    if args.schema.is_some() && (streamed || args.start != Start::Fresh) {
+        return Err(
+            "--json-schema needs a session of its own, so it does not work with -c, -r or --input-format stream-json."
+                .into(),
+        );
+    }
+    Ok(args)
+}
+
+/// The words that look at runs in the background, as the first word.
+const RUNS: [&str; 4] = ["sessions", "attach", "logs", "stop"];
+
+impl Args {
+    /// Whether this is a `-p` run, answered and left rather than a conversation.
+    pub fn once(&self) -> bool {
+        self.prompt.is_some() || self.input == Input::StreamJson
+    }
+}
+
+/// The number after a flag, which has to be a whole one above zero.
+fn above_zero<T: std::str::FromStr + PartialOrd + From<u8>>(
+    value: Option<String>,
+    error: &str,
+) -> Result<T, String> {
+    value
+        .and_then(|value| value.parse::<T>().ok())
+        .filter(|n| *n > T::from(0))
+        .ok_or_else(|| error.to_owned())
+}
+
+/// The instructions after `flag`: the text itself, or for a `-file` flag
+/// what the file it names holds.
+fn given_prompt(flag: &str, value: Option<String>) -> Result<String, String> {
+    let file = flag.ends_with("-file");
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Err(match file {
+            true => format!("{flag} takes a file, like {flag} rules.md."),
+            false => format!("{flag} takes the instructions, like {flag} \"Answer in French.\""),
+        });
+    };
+    if !file {
+        return Ok(value);
+    }
+    let text = std::fs::read_to_string(&value)
+        .map_err(|e| format!("Could not read the instructions in {value}: {e}"))?;
+    if text.trim().is_empty() {
+        return Err(format!("{value} is empty, so it gives no instructions."));
+    }
+    Ok(text)
+}
+
+/// The tool names after `--tools`, split at the commas.
+fn tool_names(value: Option<String>) -> Result<Vec<String>, String> {
+    let names: Vec<String> = value
+        .filter(|value| !value.starts_with('-'))
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if names.is_empty() {
+        return Err(
+            "--tools takes tool names split by commas, like --tools read_file,search.".into(),
+        );
+    }
+    Ok(names)
+}
+
+/// The mode the flags pick, or which flag to drop when `--mode` and a
+/// shorthand for one both pick it.
+fn picked(mode: Option<Result<Mode, String>>, yes: bool, plan: bool) -> Result<Mode, String> {
+    let drop = |flag: &str, name: &str| {
+        Err(format!(
+            "`--mode` and `{flag}` both pick the mode; drop `{flag}`, which is `--mode {name}`."
+        ))
+    };
+    match mode {
+        Some(_) if yes => drop("--yes", "bypass"),
+        Some(_) if plan => drop("--plan", "plan"),
+        Some(mode) => mode,
+        // Before modes, `--plan --yes` planned with no cards; it never
+        // wrote, so it does not become a mode that does.
+        None if plan => Ok(Mode::Plan),
+        None if yes => Ok(Mode::Bypass),
+        None => Ok(Mode::Default),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Input, Output, parse};
+    use vythea_core::gate::Mode;
+    use vythea_core::memory::{Saving, Scope};
+
+    fn args(words: &[&str]) -> super::Args {
+        parse(words.iter().map(|w| w.to_string())).unwrap()
+    }
+
+    #[test]
+    fn only_a_flag_picks_the_mode_the_terminal_starts_in() {
+        assert!(!args(&[]).mode_picked);
+        assert!(args(&["--plan"]).mode_picked);
+        assert!(args(&["--yes"]).mode_picked);
+        assert!(args(&["--mode", "default"]).mode_picked);
+    }
+
+    #[test]
+    fn reads_the_forms_people_actually_type() {
+        let bare = args(&[]);
+        assert!(bare.prompt.is_none() && bare.start == super::Start::Fresh);
+        assert_eq!(bare.mode, Ok(Mode::Default));
+
+        assert_eq!(args(&["-p", "hello"]).prompt.as_deref(), Some("hello"));
+        assert_eq!(args(&["--print", "hello"]).prompt.as_deref(), Some("hello"));
+        // A bare word is a prompt, so quoting alone is enough.
+        assert_eq!(
+            args(&["what is this"]).prompt.as_deref(),
+            Some("what is this")
+        );
+        // A flag after it must not be swallowed as the prompt.
+        let mixed = args(&["--plan", "look around"]);
+        assert_eq!(mixed.mode, Ok(Mode::Plan));
+        assert_eq!(mixed.prompt.as_deref(), Some("look around"));
+
+        assert_eq!(args(&["-c"]).start, super::Start::Last);
+        assert_eq!(args(&["--continue"]).start, super::Start::Last);
+        // Resume on its own asks which one; with an id it takes that one.
+        assert_eq!(args(&["--resume"]).start, super::Start::Choose);
+        assert_eq!(args(&["--resume", "137"]).start, super::Start::Named(137));
+        assert!(args(&["gui"]).gui);
+        assert!(args(&["serve"]).serve && args(&["serve"]).prompt.is_none());
+        assert!(args(&["update"]).update && args(&["update"]).prompt.is_none());
+        assert_eq!(args(&["--yes"]).mode, Ok(Mode::Bypass));
+        let edits = args(&["--mode", "accept-edits", "tidy up"]);
+        assert_eq!(edits.mode, Ok(Mode::AcceptEdits));
+        assert_eq!(edits.prompt.as_deref(), Some("tidy up"));
+        assert_eq!(args(&["--mode", "auto"]).mode, Ok(Mode::Auto));
+        assert!(args(&["--mode"]).mode.is_err());
+        assert!(args(&["-h"]).help);
+        assert!(args(&["--version"]).version && args(&["-V"]).version);
+        // `mcp` first hands every word after it on, flags and all.
+        let mcp = args(&["mcp", "add", "fs", "-e", "K=V", "--", "npx", "-y"]);
+        assert_eq!(
+            mcp.mcp.unwrap(),
+            ["add", "fs", "-e", "K=V", "--", "npx", "-y"]
+        );
+        assert_eq!(args(&["-p", "mcp"]).prompt.as_deref(), Some("mcp"));
+        assert!(args(&["acp"]).acp && args(&["acp"]).prompt.is_none());
+        assert!(!args(&["acp"]).acp_phone);
+        assert!(args(&["acp", "--phone"]).acp && args(&["acp", "--phone"]).acp_phone);
+        assert_eq!(args(&["-p", "acp"]).prompt.as_deref(), Some("acp"));
+        assert!(args(&["--worktree"]).worktree && !bare.worktree);
+        assert!(args(&["--worktree", "-p", "fix it"]).worktree);
+    }
+
+    #[test]
+    fn a_worktree_is_only_for_a_new_session() {
+        let said = "--worktree starts a new session, so it does not go with --continue or \
+                    --resume.";
+        assert_eq!(refused(&["--worktree", "-c"]), said);
+        assert_eq!(refused(&["--resume", "4", "--worktree"]), said);
+    }
+
+    #[test]
+    fn plan_with_yes_stays_plan_and_mode_with_a_shorthand_says_which_to_drop() {
+        assert_eq!(args(&["--plan", "--yes"]).mode, Ok(Mode::Plan));
+        assert_eq!(args(&["--yes", "--plan", "look"]).mode, Ok(Mode::Plan));
+        let yes = args(&["--mode", "plan", "--yes"]).mode.unwrap_err();
+        assert!(yes.contains("drop `--yes`"), "{yes}");
+        let plan = args(&["--plan", "--mode", "bypass"]).mode.unwrap_err();
+        assert!(plan.contains("drop `--plan`"), "{plan}");
+    }
+
+    /// What parsing `words` refused them with.
+    fn refused(words: &[&str]) -> String {
+        match parse(words.iter().map(|w| w.to_string())) {
+            Ok(_) => panic!("{words:?} parsed"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn the_new_flags_parse() {
+        let run = args(&[
+            "-p",
+            "tidy up",
+            "--output",
+            "stream-json",
+            "--max-rounds",
+            "40",
+            "--model",
+            "local-model",
+            "--tools",
+            "read_file, search,,list_dir",
+            "--budget",
+            "200000",
+        ]);
+        assert_eq!(run.prompt.as_deref(), Some("tidy up"));
+        assert_eq!(run.output, Output::StreamJson);
+        assert_eq!(run.max_rounds, Some(40));
+        assert_eq!(run.model.as_deref(), Some("local-model"));
+        assert_eq!(
+            run.tools,
+            Some(vec!["read_file".into(), "search".into(), "list_dir".into()])
+        );
+        assert_eq!(run.budget, Some(200_000));
+        // Before the prompt counts too, and none of them is taken for it.
+        let json = args(&["--output", "json", "what is this"]);
+        assert_eq!(json.output, Output::Json);
+        assert_eq!(json.prompt.as_deref(), Some("what is this"));
+        // So does a flag between -p and the question.
+        let between = args(&["-p", "--output", "json", "what is this"]);
+        assert_eq!(between.output, Output::Json);
+        assert_eq!(between.prompt.as_deref(), Some("what is this"));
+        let plain = args(&["-p", "hello"]);
+        assert_eq!(plain.output, Output::Text);
+        assert!(plain.max_rounds.is_none() && plain.tools.is_none() && plain.budget.is_none());
+
+        assert_eq!(
+            refused(&["-p", "x", "--output", "yaml"]),
+            "--output takes text, json or stream-json."
+        );
+        assert_eq!(
+            refused(&["-p", "x", "--max-rounds", "0"]),
+            "--max-rounds takes a number of tool rounds above 0, like --max-rounds 10."
+        );
+        assert!(refused(&["-p", "x", "--max-rounds", "many"]).starts_with("--max-rounds takes"));
+        assert!(refused(&["-p", "x", "--budget", "-5"]).starts_with("--budget takes"));
+        // A flag where the value should be is a missing value, not a name.
+        assert_eq!(
+            refused(&["-p", "x", "--model", "--yes"]),
+            "--model takes the name of a model."
+        );
+        assert!(refused(&["-p", "x", "--tools", ","]).starts_with("--tools takes"));
+        assert!(refused(&["-p", "x", "--budget"]).starts_with("--budget takes"));
+        assert!(refused(&["-p", "--output", "json"]).starts_with("-p takes the question"));
+        assert_eq!(
+            refused(&["--budget", "1000"]),
+            "--output, --max-rounds, --tools and --budget only work with -p."
+        );
+    }
+
+    #[test]
+    fn a_resume_word_that_is_not_an_id_is_an_error() {
+        let no_id = "--resume takes a session id, like --resume 42.";
+        assert_eq!(refused(&["--resume", "hello"]), no_id);
+        assert_eq!(refused(&["-p", "go on", "-r", "last"]), no_id);
+        // A flag after it is the next flag, and the list is offered.
+        let flagged = args(&["--resume", "--plan"]);
+        assert_eq!(flagged.start, super::Start::Choose);
+        assert_eq!(flagged.mode, Ok(Mode::Plan));
+        // Nobody sees the list under -p, so there it needs the id.
+        let listed = "With -p, --resume takes a session id, like --resume 42.";
+        assert_eq!(refused(&["-p", "go on", "--resume"]), listed);
+        assert_eq!(refused(&["go on", "-r"]), listed);
+    }
+
+    #[test]
+    fn continue_after_print_is_not_taken_as_the_question() {
+        let continued = args(&["-p", "-c", "what changed"]);
+        assert_eq!(continued.start, super::Start::Last);
+        assert_eq!(continued.prompt.as_deref(), Some("what changed"));
+        let named = args(&["-p", "-r", "42", "go on"]);
+        assert_eq!(named.start, super::Start::Named(42));
+        assert_eq!(named.prompt.as_deref(), Some("go on"));
+        // A question of more than one word that starts with a dash is still one.
+        let dashed = args(&["-p", "-5 or 5?"]);
+        assert_eq!(dashed.prompt.as_deref(), Some("-5 or 5?"));
+    }
+
+    #[test]
+    fn dump_config_takes_the_run_flags_without_p_but_no_session_to_resume() {
+        let dump = args(&[
+            "--dump-config",
+            "--max-rounds",
+            "40",
+            "--tools",
+            "read_file",
+            "--budget",
+            "1000",
+        ]);
+        assert!(dump.dump_config && !dump.once());
+        assert_eq!(dump.max_rounds, Some(40));
+        // So a runner can add it to the line it runs with.
+        assert!(args(&["-p", "fix it", "--output", "json", "--dump-config"]).dump_config);
+        assert!(!args(&["-p", "fix it"]).dump_config);
+        let resumed =
+            "--dump-config describes a new session, so it takes no --continue or --resume.";
+        assert_eq!(refused(&["--dump-config", "--continue"]), resumed);
+        assert_eq!(refused(&["--dump-config", "--resume", "137"]), resumed);
+    }
+
+    #[test]
+    fn json_schema_takes_a_file_or_the_schema_and_only_works_with_p() {
+        let run = args(&["-p", "--json-schema", "answer.json", "count them"]);
+        assert_eq!(run.schema.as_deref(), Some("answer.json"));
+        assert_eq!(run.prompt.as_deref(), Some("count them"));
+        let inline = args(&["-p", "count them", "--json-schema", r#"{"type":"integer"}"#]);
+        assert_eq!(inline.schema.as_deref(), Some(r#"{"type":"integer"}"#));
+        assert!(args(&["-p", "hi"]).schema.is_none());
+
+        assert_eq!(
+            refused(&["-p", "x", "--json-schema", "--yes"]),
+            "--json-schema takes a JSON Schema file, like --json-schema answer.json."
+        );
+        assert!(refused(&["-p", "x", "--json-schema"]).starts_with("--json-schema takes"));
+        assert_eq!(
+            refused(&["--json-schema", "answer.json"]),
+            "--json-schema only works with -p."
+        );
+        let own = "--json-schema needs a session of its own, so it does not work with -c, -r or --input-format stream-json.";
+        assert_eq!(
+            refused(&["-p", "x", "-c", "--json-schema", "answer.json"]),
+            own
+        );
+        assert_eq!(
+            refused(&["-p", "x", "--resume", "7", "--json-schema", "answer.json"]),
+            own
+        );
+        let streamed = [
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output",
+            "stream-json",
+            "--json-schema",
+            "answer.json",
+        ];
+        assert_eq!(refused(&streamed), own);
+    }
+
+    #[test]
+    fn stream_json_in_takes_no_question_and_needs_stream_json_out() {
+        let run = args(&[
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output",
+            "stream-json",
+            "--permission-prompt-tool",
+            "stdio",
+        ]);
+        assert_eq!(run.input, Input::StreamJson);
+        assert!(run.ask_stdio && run.prompt.is_none() && run.once());
+        assert!(!args(&[]).once() && args(&["-p", "hi"]).once());
+
+        assert_eq!(
+            refused(&["-p", "--input-format", "yaml"]),
+            "--input-format takes text or stream-json."
+        );
+        assert!(
+            refused(&["--input-format", "stream-json", "--output", "stream-json"])
+                .ends_with("only works with -p.")
+        );
+        let asked = [
+            "-p",
+            "hi",
+            "--input-format",
+            "stream-json",
+            "--output",
+            "stream-json",
+        ];
+        assert!(refused(&asked).ends_with("so -p takes no question."));
+        assert_eq!(
+            refused(&["-p", "--input-format", "stream-json"]),
+            "--input-format stream-json needs --output stream-json."
+        );
+        assert!(
+            refused(&["-p", "hi", "--permission-prompt-tool", "stdio"])
+                .starts_with("--permission-prompt-tool stdio needs")
+        );
+        assert_eq!(
+            refused(&["-p", "hi", "--permission-prompt-tool", "mcp__ask"]),
+            "--permission-prompt-tool takes stdio."
+        );
+    }
+
+    #[test]
+    fn an_unknown_flag_is_an_error() {
+        // The word after it is not taken for the question.
+        assert_eq!(
+            refused(&["--foo", "bar"]),
+            "Unknown option --foo; see vythea --help."
+        );
+        // A typo does not run with the defaults instead.
+        assert_eq!(
+            refused(&["--max-round", "5", "-p", "q"]),
+            "Unknown option --max-round; see vythea --help."
+        );
+        assert_eq!(
+            refused(&["-p", "q", "-x"]),
+            "Unknown option -x; see vythea --help."
+        );
+        // A question that starts with a dash still goes after -p.
+        assert_eq!(
+            args(&["-p", "-5 or 5?"]).prompt.as_deref(),
+            Some("-5 or 5?")
+        );
+    }
+
+    #[test]
+    fn a_word_after_the_question_is_an_error() {
+        assert_eq!(
+            refused(&["-p", "what", "is", "this"]),
+            "`is` came after the question; a question of more than one word goes in quotes, like -p \"what is this\"."
+        );
+        assert!(refused(&["what", "--plan", "now"]).starts_with("`now` came after the question"));
+    }
+
+    #[test]
+    fn bg_takes_a_task_and_the_run_words_take_an_id_only_as_the_first_word() {
+        use super::Runs;
+        let started = args(&["--bg", "fix the flaky test", "--mode", "auto"]);
+        assert!(started.bg && started.once());
+        assert_eq!(started.prompt.as_deref(), Some("fix the flaky test"));
+        assert!(args(&["--bg", "-r", "42", "carry on"]).bg);
+        assert!(refused(&["--bg"]).starts_with("--bg takes what to do"));
+        assert!(refused(&["--bg", "--output", "json", "x"]).contains("no --output"));
+        assert!(refused(&["--bg", "-r", "x"]).contains("session id"));
+        assert_eq!(args(&["sessions"]).runs, Some(Runs::List));
+        assert_eq!(args(&["attach", "42"]).runs, Some(Runs::Attach(42)));
+        assert_eq!(args(&["logs", "7"]).runs, Some(Runs::Logs(7)));
+        assert_eq!(args(&["stop", "7"]).runs, Some(Runs::Stop(7)));
+        assert!(refused(&["stop"]).contains("vythea sessions lists them"));
+        assert!(refused(&["attach", "it"]).contains("takes a session id"));
+        // A question that only starts with one of them is still a question.
+        let asked = args(&["stop the server"]);
+        assert_eq!(asked.runs, None);
+        assert_eq!(asked.prompt.as_deref(), Some("stop the server"));
+        assert_eq!(args(&["-p", "stop"]).runs, None);
+        // The run's own token is not offered in --help.
+        assert_eq!(
+            args(&["--background", "t1", "x"]).background.as_deref(),
+            Some("t1")
+        );
+        assert!(!super::HELP.contains("--background"));
+    }
+
+    #[test]
+    fn the_memory_flags_read_their_choices_and_private_starts_a_new_chat() {
+        let flagged = args(&[
+            "--memory",
+            "when-asked",
+            "--memory-scope",
+            "chat",
+            "-p",
+            "q",
+        ]);
+        assert_eq!(flagged.memory, Some(Saving::WhenAsked));
+        assert_eq!(flagged.memory_scope, Some(Scope::Chat));
+        assert_eq!(args(&["--memory", "ask"]).memory, Some(Saving::Ask));
+        assert!(args(&["--private", "-p", "q"]).private);
+        assert!(refused(&["--memory", "often"]).contains("when-asked, ask or auto"));
+        assert!(refused(&["--memory-scope", "team"]).contains("auto, project or chat"));
+        assert!(refused(&["--private", "--continue"]).starts_with("--private starts a new chat"));
+    }
+
+    #[test]
+    fn a_session_is_named_and_forked_from_the_command_line() {
+        let named = args(&["--name", "release notes", "-c"]);
+        assert_eq!(named.name.as_deref(), Some("release notes"));
+        assert_eq!(named.start, super::Start::Last);
+        assert!(args(&["--fork-session", "-r", "42"]).fork);
+        assert!(args(&["-c", "--fork-session", "-p", "q"]).fork);
+        assert!(refused(&["--fork-session"]).starts_with("--fork-session copies"));
+        assert!(refused(&["--fork-session", "--resume"]).starts_with("--fork-session copies"));
+        assert!(refused(&["--name"]).starts_with("--name takes"));
+        assert!(refused(&["--name", "-c"]).starts_with("--name takes"));
+    }
+
+    #[test]
+    fn the_system_prompt_flags_take_text_or_a_file_and_each_once() {
+        let given = args(&["--system-prompt", "You review code.", "-p", "q"]);
+        assert_eq!(given.system_prompt.as_deref(), Some("You review code."));
+        assert_eq!(given.prompt.as_deref(), Some("q"));
+        let file = std::env::temp_dir().join(format!("vythea-append-{}.md", std::process::id()));
+        std::fs::write(&file, "Answer in French.\n").unwrap();
+        let path = file.to_str().unwrap();
+        let appended = args(&["--append-system-prompt-file", path]);
+        assert_eq!(
+            appended.append_system_prompt.as_deref(),
+            Some("Answer in French.\n")
+        );
+        assert_eq!(appended.system_prompt, None);
+        let twice = refused(&["--system-prompt", "a", "--system-prompt-file", path]);
+        std::fs::remove_file(&file).unwrap();
+        assert!(twice.contains("given twice"), "{twice}");
+        assert!(refused(&["--system-prompt"]).contains("takes the instructions"));
+        assert!(refused(&["--append-system-prompt-file", path]).contains("Could not read"));
+        let empty = std::env::temp_dir().join(format!("vythea-empty-{}.md", std::process::id()));
+        std::fs::write(&empty, " \n").unwrap();
+        let blank = refused(&["--system-prompt-file", empty.to_str().unwrap()]);
+        std::fs::remove_file(&empty).unwrap();
+        assert!(blank.contains("is empty"), "{blank}");
+    }
+
+    #[test]
+    fn add_dir_takes_one_folder_a_flag_and_leaves_the_question_alone() {
+        let given = args(&["--add-dir", "../lib", "--add-dir", "~/docs", "fix it"]);
+        assert_eq!(given.add_dirs, ["../lib", "~/docs"]);
+        assert_eq!(given.prompt.as_deref(), Some("fix it"));
+        assert!(refused(&["--add-dir"]).contains("takes a folder"));
+        assert!(refused(&["--add-dir", "-p", "q"]).contains("takes a folder"));
+    }
+
+    /// The skill that tells the model how Vythea works keeps up with what
+    /// `--help` and `/help` list, so a verb added since is not left to a
+    /// guess. Its page or its `commands.md` may name each, whichever has
+    /// room.
+    #[test]
+    fn the_help_skill_names_every_cli_verb_and_slash_command() {
+        let skill = [
+            include_str!("../../core/skills-builtin/vythea/SKILL.md"),
+            include_str!("../../core/skills-builtin/vythea/commands.md"),
+        ]
+        .join("\n");
+        // Named whole: `/mode` inside `/model` is not `/mode`.
+        let names = |word: &str| {
+            skill.match_indices(word).any(|(at, _)| {
+                !skill[at + word.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '-')
+            })
+        };
+        let mut missing = Vec::new();
+        for line in super::HELP.lines().map(str::trim) {
+            // A use, `vythea mcp serve   offer ...`: the words before
+            // the gap and any placeholder.
+            if let Some(usage) = line.strip_prefix("vythea ") {
+                let words: Vec<&str> = usage
+                    .split("  ")
+                    .next()
+                    .unwrap_or_default()
+                    .split(' ')
+                    .filter(|word| !word.is_empty())
+                    .take_while(|word| !word.starts_with(['<', '[', '"']))
+                    .collect();
+                let verb = format!("vythea {}", words.join(" "));
+                if !words.is_empty() && !names(&verb) {
+                    missing.push(verb);
+                }
+            }
+            // An option, `-p, --print <prompt>   ask ...`: its long name.
+            if line.starts_with('-') {
+                let flags = line.split("  ").next().unwrap_or_default();
+                for flag in flags.split([' ', ',']).filter(|f| f.starts_with("--")) {
+                    if !names(flag) {
+                        missing.push(flag.to_owned());
+                    }
+                }
+            }
+        }
+        for command in crate::bar::COMMANDS {
+            if !names(command.name) {
+                missing.push(command.name.to_owned());
+            }
+        }
+        assert!(missing.is_empty(), "The help skill leaves out {missing:?}");
+    }
+}

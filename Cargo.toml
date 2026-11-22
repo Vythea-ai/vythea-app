@@ -1,0 +1,51 @@
+# The agent is split so the terminal frontend does not have to drag a GPU UI
+# framework in behind it: `core` is the whole agent with no idea what is
+# driving it, and the two binaries are the ways of driving it.
+[workspace]
+members = ["crates/core", "crates/gui", "crates/cli"]
+# Third-party code kept here as published: not ours to lint or format.
+exclude = ["vendor"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0-alpha.5.1"
+license = "MIT"
+repository = "https://github.com/wweziza/vythea"
+edition = "2024"
+
+[workspace.dependencies]
+vythea-core = { path = "crates/core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-channel = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[patch.crates-io]
+# gpui-pre-windows 0.3.8 -- zed's gpui_windows, the snapshot GPUI Kit 0.7.1
+# pins -- as published on crates.io, less its Cargo.lock, so the Windows
+# renderer can be changed without a fork of all of zed. What differs from it:
+# - Windows: the path textures (MSAA, 20 bytes a pixel) are made for the
+#   first path a frame draws, and handed back to the driver 5 s after the last
+#   or when the window leaves the front
+# - Windows: windows that are minimized or hidden are not asked to redraw
+#   at every refresh of the display
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# gpui-pre-apple 0.3.8 -- zed's gpui_apple, the Metal renderer behind every
+# macOS window, from the same snapshot -- as published on crates.io, less its
+# Cargo.lock. What differs from it:
+# - macOS: a window can ask for the next frame it draws to be read back.
+#   That one frame is drawn readable -- framebufferOnly off, which would cost
+#   every frame its presentation if left so -- and copied out once the GPU
+#   is done with it, for the blur behind Settings on macOS 26, where the
+#   window server gives an app no picture of its own window. A frame read
+#   back is not shown, so it can be the window without Settings over it
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
+
+[profile.dev]
+debug = 0

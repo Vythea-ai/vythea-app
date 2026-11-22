@@ -1,0 +1,150 @@
+//! Vythea without a user interface.
+//!
+//! Everything here runs headless: the chat transport, the tools, background
+//! jobs, schedules, skills, the session store, and the agent loop that ties
+//! them together. Nothing in this crate knows whether a window or a terminal
+//! is driving it, which is the point -- the two frontends share one agent
+//! instead of growing two that slowly disagree.
+
+pub mod agent;
+pub mod agent_defs;
+pub mod agents;
+pub mod approvals;
+pub mod auth;
+pub mod background;
+#[cfg(test)]
+mod bench;
+pub mod browser;
+pub mod budget;
+mod builds;
+pub mod cache_miss;
+pub mod cancel;
+mod cat;
+mod cdp;
+pub mod chat;
+pub mod cloud;
+pub mod command;
+pub mod commit;
+pub mod compact;
+pub mod complete;
+pub mod computer;
+mod contract;
+#[cfg(feature = "workflows")]
+pub mod crew;
+pub mod diag;
+mod docs;
+mod downloads;
+pub mod driver;
+mod dumps;
+mod echo;
+mod edit;
+pub mod export;
+pub mod failure;
+pub mod fallback;
+pub mod files;
+mod filestate;
+pub mod formatter;
+pub mod gate;
+pub mod gateway;
+pub mod git;
+pub mod goal;
+mod grep;
+pub mod headless;
+pub mod history;
+pub mod hooks;
+pub mod import;
+pub mod inbox;
+pub mod info;
+pub mod init;
+mod inputs;
+pub mod insights;
+pub mod interrupt;
+pub mod jev;
+pub mod jobs;
+#[cfg(feature = "js")]
+mod js;
+pub mod judge;
+pub mod limits;
+mod login_env;
+pub mod lsp;
+mod machine;
+pub mod mcp;
+pub mod mcp_auth;
+mod mcp_find;
+pub mod mcp_paste;
+pub mod mcp_serve;
+pub mod media;
+pub mod memory;
+pub mod messaging;
+mod missing;
+pub mod models;
+mod notebook;
+pub mod notify;
+pub mod on_device;
+mod page;
+pub mod palette;
+mod patch;
+pub mod paths;
+pub mod permissions;
+pub mod phone;
+pub mod plugins;
+mod prefilter;
+pub mod preview;
+pub mod profiles;
+pub mod prompt_rules;
+pub mod providers;
+pub mod recap;
+mod redact;
+pub mod references;
+pub mod remote;
+mod requirements;
+pub mod retry;
+pub mod review;
+pub mod sandbox;
+mod scan;
+pub mod schedule;
+pub mod setup;
+#[cfg(feature = "workflows")]
+mod script;
+pub mod search;
+mod side;
+pub mod skills;
+pub mod slash;
+mod snapshot;
+mod spec_tests;
+pub mod speech;
+mod state;
+pub mod store;
+pub mod structured;
+pub mod styles;
+mod subfolders;
+#[cfg(feature = "syntax")]
+mod syntax;
+mod taint;
+pub mod tasklist;
+pub mod tasks;
+mod think;
+pub mod timers;
+pub mod title;
+pub mod tool_progress;
+pub mod tool_runs;
+pub mod tools;
+pub mod toolset;
+mod twins;
+mod unchanged;
+mod unified;
+pub mod untrusted;
+pub mod update;
+pub mod usage;
+pub mod vault;
+pub mod wake;
+pub mod wallet;
+pub mod watch;
+pub mod web;
+#[cfg(feature = "workflows")]
+pub mod workflow;
+pub mod worktree;
+mod write;
+
+/// The name the app goes by, used in paths and on screen.
+pub const BRAND: &str = "Vythea";

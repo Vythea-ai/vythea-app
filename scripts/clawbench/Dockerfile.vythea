@@ -1,0 +1,52 @@
+# Vythea's terminal agent, `vythea -p`, on ClawBench's browser image.
+# Source: scripts/clawbench in the Vythea repo, which fork.patch copies here.
+#
+# The Vythea repo is private, so the clone needs a GitHub token that can
+# read it, given as a build secret. ClawBench's own build passes none, so
+# build this image once by hand; ClawBench's rebuilds then reuse the cached
+# layer:
+#   docker build --secret id=vythea_token,env=GITHUB_TOKEN \
+#     -f src/clawbench/runtime/harnesses/vythea/Dockerfile.vythea \
+#     -t clawbench-vythea src/clawbench/runtime
+#
+# The commit built: bump it to measure a newer Vythea.
+ARG VYTHEA_REF=103a3b95918ad7ef3d02a139f0ef25e5adb9fd6a
+
+# Bookworm's older glibc, so the binary also runs on the base image's newer
+# one. 1.98 is the toolchain Vythea is developed on; an older one may lack
+# what it uses.
+FROM rust:1.98-slim-bookworm AS vythea-builder
+ARG VYTHEA_REF
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build/vythea
+# The token goes in a header rather than the URL, which git would keep in
+# FETCH_HEAD, and .git goes before the layer is saved. With no token the
+# fetch goes without one, for a fork that is public.
+RUN --mount=type=secret,id=vythea_token \
+    set --; \
+    if [ -s /run/secrets/vythea_token ]; then \
+      set -- -c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$(cat /run/secrets/vythea_token)" | base64 -w0)"; \
+    fi; \
+    git init -q . \
+    && { git "$@" fetch -q --depth 1 https://github.com/Vythea-ai/vythea-app.git "$VYTHEA_REF" \
+         || { echo "Could not fetch Vythea $VYTHEA_REF: build with --secret id=vythea_token,env=GITHUB_TOKEN, a token that can read vythea/vythea." >&2; exit 1; }; } \
+    && git checkout -q FETCH_HEAD \
+    && rm -rf .git
+RUN cargo build --release --locked -p vythea-cli \
+    && install -D -m 0755 target/release/vythea /out/vythea \
+    && rm -rf target
+
+FROM clawbench-base
+
+# LiteLLM serves Anthropic and Gemini models as the OpenAI-compatible chat
+# API, the only one Vythea's gateways speak.
+RUN pip install --no-cache-dir 'litellm[proxy]==1.83.9'
+
+COPY --from=vythea-builder /out/vythea /usr/local/bin/vythea
+
+COPY harnesses/vythea/setup-vythea.sh /setup-vythea.sh
+COPY harnesses/vythea/run-vythea.sh   /run-harness.sh
+COPY harnesses/vythea/usage-emitter.py  /usage-emitter.py
+RUN chmod +x /setup-vythea.sh /run-harness.sh /usage-emitter.py

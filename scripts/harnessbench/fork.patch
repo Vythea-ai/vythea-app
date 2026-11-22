@@ -1,0 +1,517 @@
+diff --git a/config/harness.example.yaml b/config/harness.example.yaml
+index 1e90ee9..618985c 100644
+--- a/config/harness.example.yaml
++++ b/config/harness.example.yaml
+@@ -103,6 +103,21 @@
+       "use_usage_proxy": true,
+       "args": ["chat"]
+     },
++    # Vythea's terminal agent (scripts/harnessbench in the Vythea repo).
++    # No timeout_sec, so each task's own applies. upstream is the provider's
++    # OpenAI-compatible base URL, which the adapter reaches through the usage
++    # proxy; the key is read from the variable api_key_env names.
++    # permission_mode "auto" runs Vythea's approval judge instead of bypass.
++    "vythea-local": {
++      "adapter": "vythea",
++      "command": "vythea",
++      "session_prefix": "harnessbench-vythea",
++      "model": "gpt-5.4",
++      "upstream": "https://api.openai.com/v1",
++      "api_key_env": "OPENAI_API_KEY",
++      "max_rounds": 150,
++      "permission_mode": "bypass"
++    },
+     "generic-cli": {
+       "adapter": "generic_cli",
+       "command": "my-agent-cli",
+diff --git a/src/harnessbench/adapters/__init__.py b/src/harnessbench/adapters/__init__.py
+index 90ea89e..37a4c7c 100644
+--- a/src/harnessbench/adapters/__init__.py
++++ b/src/harnessbench/adapters/__init__.py
+@@ -11,6 +11,7 @@ from harnessbench.adapters.openclaw import OpenClawAdapter
+ from harnessbench.adapters.picoclaw import PicoClawAdapter
+ from harnessbench.adapters.zeroclaw import ZeroClawAdapter
+ from harnessbench.adapters.hermes import HermesAgentAdapter
++from harnessbench.adapters.vythea import VytheaAdapter
+ 
+ __all__ = [
+     "BaseAdapter",
+@@ -26,4 +27,5 @@ __all__ = [
+     "HermesAgentAdapter",
+     "MoltisAdapter",
+     "FairyClawAdapter",
++    "VytheaAdapter",
+ ]
+diff --git a/src/harnessbench/adapters/vythea.py b/src/harnessbench/adapters/vythea.py
+new file mode 100644
+index 0000000..30b8cde
+--- /dev/null
++++ b/src/harnessbench/adapters/vythea.py
+@@ -0,0 +1,313 @@
++"""Harness-Bench adapter for Vythea's terminal agent, `vythea -p`.
++
++Each call is one benchmark round. The task's sandbox gets a Vythea data
++folder of its own, seeded on the first round with settings that send every
++model call through the harness's usage proxy, since without a trace the
++process judge never runs and process and security default to 1. Later
++rounds find those settings and the session already there, and `-c` carries
++the conversation on: with no session yet, `-c` starts one, so it is passed
++every time.
++
++The adapter owns the task's timeout. Vythea is given a deadline
++TURN_MARGIN_SEC short of it, so it is told to write its outputs and ends
++itself with its result line in time; past the timeout, the adapter
++interrupts it as Ctrl-C would, which is how Vythea ends its commands,
++browser and MCP servers, and kills everything left in its session if that
++takes too long. A round that ran out of time still returns, so the oracle
++scores what reached out/.
++
++This file lives in Vythea's repo as scripts/harnessbench/vythea.py, and
++fork.patch there puts a copy in Harness-Bench as
++src/harnessbench/adapters/vythea.py.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import signal
++import subprocess
++import time
++from pathlib import Path
++from typing import Any
++
++from harnessbench.adapters.base import BaseAdapter
++from harnessbench.models import AdapterRunContext, AdapterRunResult
++from harnessbench.usage_proxy import register_routes
++
++# The usage proxy's path prefix for Vythea's calls; the proxy forwards
++# what follows it to the configured upstream.
++ROUTE = "/vythea/main"
++
++# Tool rounds a message gets. Vythea's own default of 25 stops long tasks
++# well short of their timeouts, which are 180 to 3600 seconds.
++MAX_ROUNDS = 150
++
++# Seconds of the task's timeout kept back from Vythea's own deadline, as
++# OpenHuman's benchmark rig keeps them from a harness's turn: at the
++# deadline Vythea stops with its result line, before the interrupt. A
++# timeout barely over this keeps at least half of itself.
++TURN_MARGIN_SEC = 120
++
++# Seconds a reply may stay quiet before Vythea gives up on it. The usage
++# proxy passes a reply on only once it is whole, so a reply reads as silent
++# until then, and Vythea's own 300 fails any that takes longer; this is
++# how long the proxy itself waits on its upstream.
++READ_TIMEOUT_SEC = 1200
++
++# Seconds Vythea has after the interrupt before its group is killed. It
++# gives its commands two seconds to end (END_WAIT in crates/cli/src/main.rs),
++# so ten leaves room on a loaded machine.
++STOP_GRACE_SEC = 10.0
++
++# Seconds to look at the proxy's log again when it shows no answered call.
++# The proxy writes a call's line only after sending the answer, so the last
++# line can land just after Vythea exits; half a second covers the write.
++LOG_SETTLE_SEC = 0.5
++
++
++class VytheaAdapter(BaseAdapter):
++    name = "vythea"
++
++    def run(self, ctx: AdapterRunContext) -> AdapterRunResult:
++        """Runs one round of the task with `vythea -p` and says how it went."""
++        cfg = ctx.model_config
++        model = str(cfg.get("model") or "").strip()
++        upstream = str(cfg.get("upstream") or "").strip()
++        if not model or not upstream:
++            return AdapterRunResult(
++                ok=False,
++                stderr="The vythea harness entry needs `model`, and `upstream`: the provider's "
++                "OpenAI-compatible base URL, such as https://api.openai.com/v1.",
++            )
++        proxy_url = str(ctx.env.get("HARNESSBENCH_LLM_PROXY_URL") or "")
++        routes = str(ctx.env.get("HARNESSBENCH_LLM_PROXY_ROUTES") or "")
++        if not proxy_url or not routes:
++            return AdapterRunResult(
++                ok=False,
++                stderr="The usage proxy is not running, so this round would leave no trace to judge.",
++            )
++        key_env = str(cfg.get("api_key_env") or "").strip()
++        key = os.environ.get(key_env, "") if key_env else ""
++        if key_env and not key:
++            return AdapterRunResult(ok=False, stderr=f"`api_key_env` names {key_env}, which is not set.")
++
++        register_routes(
++            Path(routes),
++            {ROUTE: {"framework": "vythea", "provider": "main", "upstream": upstream}},
++        )
++        data = ctx.sandbox / ".vythea"
++        seed(data, proxy_url.rstrip("/") + ROUTE, model, key)
++
++        cmd = [
++            str(cfg.get("command") or "vythea"),
++            # Before -p: straight after it, -c would be taken for the question.
++            "-c",
++            "-p",
++            ctx.prompt,
++            "--output",
++            "json",
++            # bypass is --yes; "auto" lets Vythea's judge decide instead.
++            "--mode",
++            str(cfg.get("permission_mode") or "bypass"),
++            "--model",
++            model,
++            "--max-rounds",
++            str(int(cfg.get("max_rounds") or MAX_ROUNDS)),
++            *[str(arg) for arg in cfg.get("extra_args") or []],
++        ]
++        env = os.environ.copy()
++        env.update(ctx.env)
++        env.update(
++            {
++                # Neither the operator's data folder nor their home is read.
++                "HOME": str(ctx.sandbox),
++                "AGENT_DATA_DIR": str(data),
++                # The agent's PATH and python are the harness's, not those a
++                # login shell's rc files would give.
++                "VYTHEA_NO_LOGIN_ENV": "1",
++                # Nothing may open a sign-in page or any other in a browser.
++                "BROWSER": "/usr/bin/false",
++                "NO_COLOR": "1",
++                "VYTHEA_DEADLINE": str(deadline(ctx.timeout_sec)),
++            }
++        )
++        env.setdefault("VYTHEA_READ_TIMEOUT", str(READ_TIMEOUT_SEC))
++        # A debug build files keys in the Keychain under this name.
++        env.pop("VYTHEA_VAULT_SERVICE", None)
++
++        log = ctx.sandbox / "usage-proxy" / "requests.jsonl"
++        answered_before = answered_calls(log)
++        returncode, stdout, stderr, timed_out = run_owned(cmd, ctx.workspace, env, ctx.timeout_sec)
++        result = last_json(stdout)
++        # Stopped at its deadline ("deadline"; "stopped" before #594), the round
++        # ran out of time, and the harness runs no round after it either.
++        timed_out = timed_out or (result or {}).get("status") in ("deadline", "stopped")
++        answered = answered_calls(log) - answered_before
++        if answered == 0:
++            time.sleep(LOG_SETTLE_SEC)
++            answered = answered_calls(log) - answered_before
++        metadata: dict[str, Any] = {
++            "returncode": returncode,
++            "timed_out": timed_out,
++            "result": result,
++            "model_calls": answered,
++            "invalid_run": answered == 0,
++        }
++        if answered == 0:
++            metadata["invalid_reason"] = "no model call was answered through the usage proxy this round"
++        return AdapterRunResult(
++            ok=returncode == 0 and not timed_out,
++            command=cmd,
++            stdout=stdout,
++            stderr=stderr,
++            metadata=metadata,
++        )
++
++
++def deadline(timeout: float) -> int:
++    """The whole seconds a round of `timeout` gives Vythea: TURN_MARGIN_SEC fewer, but at least half, and at least 1."""
++    return max(1, int(max(timeout - TURN_MARGIN_SEC, timeout / 2)))
++
++
++def seed(data: Path, endpoint: str, model: str, key: str) -> None:
++    """Writes Vythea's settings, and its key when there is one, unless an earlier round did."""
++    settings = data / "settings.json"
++    if settings.exists():
++        return
++    data.mkdir(parents=True, exist_ok=True)
++    # The key goes first, since a later round that finds the settings
++    # writes nothing.
++    if key:
++        keys = data / "keys.json"
++        keys.write_text(json.dumps({"Custom": key}), encoding="utf-8")
++        keys.chmod(0o600)
++    settings.write_text(
++        json.dumps(
++            {
++                "endpoint": endpoint,
++                "custom_endpoint": endpoint,
++                "gateway": "Custom",
++                "model": model,
++                # Never the Keychain or Credential Manager.
++                "keys_in": "files",
++                # Each review is a model call the task did not ask for.
++                "memory_review": False,
++                "manual_updates": True,
++                # Nobody is watching, and a bell must not reach stdout.
++                "notifications": False,
++            },
++            indent=2,
++        ),
++        encoding="utf-8",
++    )
++
++
++def run_owned(cmd: list[str], cwd: Path, env: dict[str, str], timeout: float) -> tuple[int, str, str, bool]:
++    """Runs `cmd` in a session of its own, stopped at `timeout`: its exit code, output, and whether it timed out."""
++    # Vythea leaves Ctrl-C alone when it starts with it ignored, as it is
++    # under a harness started with `&` from a script, and the interrupt that
++    # ends a timed-out round would then do nothing. A handler, unlike an
++    # ignored signal, goes back to the default at exec. Harness-Bench runs
++    # rounds on its main thread, the only one that may set a handler.
++    ignored = signal.getsignal(signal.SIGINT) is signal.SIG_IGN
++    if ignored:
++        signal.signal(signal.SIGINT, signal.default_int_handler)
++    try:
++        proc = subprocess.Popen(
++            cmd,
++            cwd=str(cwd),
++            env=env,
++            stdin=subprocess.DEVNULL,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            text=True,
++            encoding="utf-8",
++            errors="replace",
++            start_new_session=True,
++        )
++    finally:
++        if ignored:
++            signal.signal(signal.SIGINT, signal.SIG_IGN)
++    try:
++        stdout, stderr = proc.communicate(timeout=timeout)
++        return proc.returncode, stdout, stderr, False
++    except subprocess.TimeoutExpired:
++        pass
++    except BaseException:
++        # The harness's own Ctrl-C never reaches a session of its own, so
++        # Vythea would carry on unattended.
++        stop(proc)
++        raise
++    stop(proc)
++    # Every call gives all the output since the start, none of it lost.
++    stdout, stderr = proc.communicate()
++    return proc.returncode, stdout, stderr, True
++
++
++def stop(proc: subprocess.Popen[str]) -> None:
++    """Interrupts `proc` as Ctrl-C would, then kills everything left in its session once the grace is up."""
++    signal_group(proc.pid, signal.SIGINT)
++    try:
++        proc.communicate(timeout=STOP_GRACE_SEC)
++    except subprocess.TimeoutExpired:
++        pass
++    finally:
++        # Even once Vythea has gone, a command it started may not have, and
++        # it would hold the pipes open and run on into the next task. Its
++        # commands, jobs, MCP servers and browser each lead a process group
++        # of their own, out of reach of the group kill, but stay in its
++        # session.
++        signal_group(proc.pid, signal.SIGKILL)
++        kill_session(proc.pid)
++
++
++def signal_group(pgid: int, sig: signal.Signals) -> None:
++    """Sends `sig` to process group `pgid`, which may have no one left in it."""
++    try:
++        os.killpg(pgid, sig)
++    except ProcessLookupError:
++        pass
++
++
++def kill_session(sid: int) -> None:
++    """Kills every process in session `sid`, saying nothing when `ps` cannot list them."""
++    try:
++        listed = subprocess.run(["ps", "-A", "-o", "pid="], capture_output=True, text=True, check=False).stdout
++    except OSError:
++        return
++    for word in listed.split():
++        try:
++            pid = int(word)
++            if os.getsid(pid) == sid:
++                os.kill(pid, signal.SIGKILL)
++        except (ValueError, OSError):
++            continue
++
++
++def last_json(stdout: str) -> dict[str, Any] | None:
++    """The last line of `stdout` that is a JSON object, which is how `--output json` ends a run."""
++    for line in reversed(stdout.splitlines()):
++        try:
++            value = json.loads(line)
++        except json.JSONDecodeError:
++            continue
++        if isinstance(value, dict):
++            return value
++    return None
++
++
++def answered_calls(log: Path) -> int:
++    """How many chat completions the usage proxy's log records an upstream answering."""
++    if not log.is_file():
++        return 0
++    count = 0
++    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
++        try:
++            row = json.loads(line)
++        except json.JSONDecodeError:
++            continue
++        status = row.get("status")
++        if str(row.get("path", "")).endswith("/chat/completions") and isinstance(status, int) and 200 <= status < 300:
++            count += 1
++    return count
+diff --git a/src/harnessbench/grading/rubric_llm.py b/src/harnessbench/grading/rubric_llm.py
+index 73f500e..6d9e50f 100644
+--- a/src/harnessbench/grading/rubric_llm.py
++++ b/src/harnessbench/grading/rubric_llm.py
+@@ -5,6 +5,7 @@ import base64
+ import json
+ import os
+ import re
++import time
+ import urllib.error
+ import urllib.request
+ from pathlib import Path
+@@ -220,6 +221,25 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
+     return None
+ 
+ 
++# A busy gateway answers 429 or 5xx, or drops the connection, and one such
++# answer used to leave the run ungraded. Seconds to wait before each new try.
++_RETRY_WAITS_SEC = (10, 30, 60)
++
++
++def _post_with_retries(req: urllib.request.Request, timeout: int) -> Any:
++    for wait in (*_RETRY_WAITS_SEC, None):
++        try:
++            with urllib.request.urlopen(req, timeout=timeout) as resp:
++                return json.loads(resp.read().decode("utf-8"))
++        except urllib.error.HTTPError as e:
++            if wait is None or not (e.code == 429 or e.code >= 500):
++                raise
++        except (urllib.error.URLError, TimeoutError, ConnectionError):
++            if wait is None:
++                raise
++        time.sleep(wait)
++
++
+ def run_llm_rubric(
+     *,
+     system: str,
+@@ -289,33 +309,38 @@ def run_llm_rubric(
+             timeout_sec,
+             int(os.environ.get("HARNESSBENCH_RUBRIC_VISION_TIMEOUT_SEC", "300")),
+         )
+-    try:
+-        with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
+-            data = json.loads(resp.read().decode("utf-8"))
+-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+-        return {
+-            "skipped": True,
+-            "reason": str(e),
+-            "scores": {},
+-            "total": None,
+-            "notes": "",
+-            "rubric_model": mdl,
+-        }
+-
+-    try:
+-        content = data["choices"][0]["message"]["content"]
+-    except (KeyError, IndexError, TypeError):
+-        return {
+-            "skipped": True,
+-            "reason": "unexpected API response shape",
+-            "raw": data,
+-            "scores": {},
+-            "total": None,
+-            "notes": "",
+-            "rubric_model": mdl,
+-        }
++    # A reply with no JSON object in it, or one without scores, is asked for
++    # once more: on a long trace the judge sometimes carries on writing the
++    # trace instead of grading it, and that can parse as an object too.
++    for _ in range(2):
++        try:
++            data = _post_with_retries(req, effective_timeout)
++        except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError) as e:
++            return {
++                "skipped": True,
++                "reason": str(e),
++                "scores": {},
++                "total": None,
++                "notes": "",
++                "rubric_model": mdl,
++            }
+ 
+-    parsed = _parse_json_object(content) if isinstance(content, str) else None
++        try:
++            content = data["choices"][0]["message"]["content"]
++        except (KeyError, IndexError, TypeError):
++            return {
++                "skipped": True,
++                "reason": "unexpected API response shape",
++                "raw": data,
++                "scores": {},
++                "total": None,
++                "notes": "",
++                "rubric_model": mdl,
++            }
++
++        parsed = _parse_json_object(content) if isinstance(content, str) else None
++        if parsed and isinstance(parsed.get("scores"), dict) and parsed["scores"]:
++            break
+     if not parsed:
+         return {
+             "skipped": False,
+diff --git a/src/harnessbench/registry.py b/src/harnessbench/registry.py
+index 8632100..89100e9 100644
+--- a/src/harnessbench/registry.py
++++ b/src/harnessbench/registry.py
+@@ -13,6 +13,7 @@ from harnessbench.adapters import (
+     PicoClawAdapter,
+     ZeroClawAdapter,
+     HermesAgentAdapter,
++    VytheaAdapter,
+ )
+ from harnessbench.adapters.base import BaseAdapter
+ 
+@@ -40,6 +41,8 @@ def build_adapter(adapter_name: str) -> BaseAdapter:
+         return ZeroClawAdapter()
+     if adapter_name == "hermes_agent":
+         return HermesAgentAdapter()
++    if adapter_name == "vythea":
++        return VytheaAdapter()
+     if adapter_name == "generic_cli":
+         return GenericCliAdapter()
+     raise ValueError(f"unknown adapter: {adapter_name}")
+diff --git a/src/harnessbench/usage_proxy.py b/src/harnessbench/usage_proxy.py
+index 75a31e3..82e4c30 100644
+--- a/src/harnessbench/usage_proxy.py
++++ b/src/harnessbench/usage_proxy.py
+@@ -23,6 +23,16 @@ def _read_json(path: Path) -> dict[str, Any]:
+         return {}
+ 
+ 
++# Request headers that carry a credential. The raw record keeps the header but
++# not its value, so a run's responses can be kept (and graded again) without
++# keeping the provider key on disk.
++_SECRET_HEADERS = {"authorization", "proxy-authorization", "x-api-key", "api-key", "cookie"}
++
++
++def _redacted_headers(items: Any) -> dict[str, str]:
++    return {k: ("[redacted]" if k.lower() in _SECRET_HEADERS else v) for k, v in items}
++
++
+ def register_routes(routes_file: Path, routes: dict[str, dict[str, Any]]) -> None:
+     existing = _read_json(routes_file)
+     existing.update(routes)
+@@ -261,7 +271,7 @@ class _UsageProxyHandler(BaseHTTPRequestHandler):
+             "path": remainder,
+             "method": self.command,
+             "status": status,
+-            "request_headers": dict(self.headers.items()),
++            "request_headers": _redacted_headers(self.headers.items()),
+             "request_body": body.decode("utf-8", errors="replace"),
+             "response_headers": dict(response_headers),
+             "response_text": decoded_text,

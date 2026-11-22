@@ -1,0 +1,4793 @@
+//! What a request says a run must leave behind, and whether it did.
+//!
+//! A run nobody watches -- `-p`, a schedule, a benchmark's task -- is judged
+//! by the files it leaves, and one that is missing or will not parse fails
+//! every check that reads it, however good the rest of the work is. A model
+//! saying it is done is no proof of that, so a session's own run looks
+//! before it ends: the request is read for the files it names under `out/`,
+//! with what it spells out for them -- a CSV header or the columns it names,
+//! JSON keys and the keys each item of a list holds, the few values a field
+//! may take and the records it is left empty in, the names and words a file
+//! must use or must not, the codes the files it names to read hold bare,
+//! the paths of inputs, alone and as the inputs write them, the ids the
+//! inputs give the items a file lists -- and each file is looked at on disk.
+//!
+//! Both halves are plain text matching rather than a model's reading, so
+//! nothing is invented, and the matching leans to missing: a file counts only
+//! where the words the user typed ask for it to be made -- one outside `out/`
+//! only by its whole path, right after them -- and one named to read, ask
+//! about, move, leave alone or not make, or inside code, a diff or a page
+//! quoted in, is no output. What it misses goes unchecked, which costs
+//! less than sending a run back for a file nobody asked for: that costs a
+//! round, and where only the last message is passed on, as from `-p`, a
+//! schedule, a chat app or MCP, the answer given before it unless the model
+//! gives it again. So a file that was there as the run began and is as it was
+//! is not looked at, and one the request only asks about is never held to
+//! what it already held. What looks wrong goes back to the model once, file
+//! by file, to weigh against the request, put right only where it asked and
+//! end with its whole answer again, since this reading can still be wrong;
+//! nothing here edits a file, since rewriting work that was right loses more
+//! than it mends.
+//!
+//! A list of values counts only where it is all a field may hold, never where
+//! it gives examples or holds for some rows, and is held only to a field the
+//! file has; keys named for each item of a list must be in every item of a
+//! list holding any of them, since one holding none is about something else.
+
+use serde_json::{Map, Value};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
+use std::time::SystemTime;
+
+/// The kinds of file a request may name as an output: those whose format is
+/// checked here, and plain ones, which are checked to be there and not empty.
+const KINDS: [&str; 11] = [
+    "json", "jsonl", "csv", "md", "txt", "yaml", "yml", "docx", "xlsx", "pptx", "png",
+];
+
+/// Words that keep the files a sentence names out of the contract, since it
+/// names them to be left for later, left out, taken away or left alone.
+const NOT_NOW: [&str; 12] = [
+    "must not", "never", "not yet", "not now", "optional", "skip", "delete", "deleted", "remove",
+    "removed", "move", "rename",
+];
+
+/// Where a sentence turns to examples, so the files it names after them
+/// need not be made.
+const EXAMPLES: [&str; 3] = ["e.g.", "for example", "for instance"];
+
+/// Words that make a sentence or a list's heading about files to read, so
+/// that what it names is input, unless it says to make something too.
+const READING: [&str; 3] = ["read", "input", "inputs"];
+
+/// Words that make a sentence ask for files to be made, though it reads some
+/// too; one with none of them, naming a file to ask about or explain, asks
+/// for nothing.
+const MAKING: [&str; 15] = [
+    "write", "create", "save", "produce", "update", "generate", "export", "output", "outputs",
+    "build", "make", "emit", "store", "put", "deliver",
+];
+
+/// Words for changing a file that, like the `MAKING` ones, keep what a
+/// sentence names out when they follow "not" or "never".
+const CHANGING: [&str; 5] = ["modify", "change", "touch", "overwrite", "edit"];
+
+/// Words said before a making or changing word to forbid it, as in "do not
+/// generate" or "told not to write".
+const NEGATING: [&str; 7] = [
+    "not",
+    "don't",
+    "dont",
+    "never",
+    "not to",
+    "no need to",
+    "forbidden to",
+];
+
+/// Words that may come between a `NEGATING` word and the one it forbids, as
+/// in "do not ever write" or "do not, under any circumstances, create".
+const BETWEEN: [&str; 6] = [
+    "",
+    "ever ",
+    "yet ",
+    "even ",
+    "try to ",
+    "under any circumstances ",
+];
+
+/// The making and changing words as "without" and "avoid" take them, as in
+/// "without creating"; a bare "without", as in "without a BOM", says how a
+/// file is made, not that it is not.
+const DOING: [&str; 19] = [
+    "creating",
+    "writing",
+    "saving",
+    "producing",
+    "updating",
+    "generating",
+    "exporting",
+    "outputting",
+    "building",
+    "making",
+    "emitting",
+    "storing",
+    "putting",
+    "delivering",
+    "modifying",
+    "changing",
+    "touching",
+    "overwriting",
+    "editing",
+];
+
+/// Making words said of something else, as in "it reads out/data.csv and
+/// writes out/plot.png": they end a `USING` word's reach, but a sentence with
+/// only these says what a thing does and asks for nothing.
+const MAKES: [&str; 13] = [
+    "writes",
+    "creates",
+    "saves",
+    "produces",
+    "updates",
+    "generates",
+    "exports",
+    "builds",
+    "makes",
+    "emits",
+    "stores",
+    "puts",
+    "delivers",
+];
+
+/// Words a sentence may open with before the making word that asks for a
+/// file elsewhere, as in "Also create" or "Then write".
+const OPENERS: [&str; 8] = [
+    "also", "then", "finally", "next", "lastly", "now", "and", "please",
+];
+
+/// The most words a making word's object may run to before "to", "as" or
+/// "into" leads to a file elsewhere: enough for "the totals for each
+/// region", and a longer run is likely a clause about something else.
+const OBJECT: usize = 6;
+
+/// The kinds of file a request gives a header for.
+const TABLES: [&str; 4] = ["csv", "tsv", "xls", "xlsx"];
+
+/// The kinds of file a request gives keys for.
+const DATA: [&str; 4] = ["json", "jsonl", "yaml", "yml"];
+
+/// Words that put a header given in a sentence naming no file in a table of
+/// a document, such as a README's, rather than in the CSV named before.
+const DOCUMENT: [&str; 3] = ["markdown", "readme", "table whose header row"];
+
+/// Words that take the file named after them as one to use or look over, as
+/// in "a test that loads out/fixture.json" or "check out/data.csv and write
+/// up what is wrong", though the sentence asks for something to be made.
+const USING: [&str; 19] = [
+    "read",
+    "reads",
+    "reading",
+    "parse",
+    "parses",
+    "parsing",
+    "load",
+    "loads",
+    "loading",
+    "explain",
+    "explains",
+    "explaining",
+    "check",
+    "inspect",
+    "look",
+    "review",
+    "examine",
+    "proofread",
+    "validate",
+];
+
+/// Words before a `USING` one that make it name a thing rather than take a
+/// file, as in "the load report", "your review" or "each check".
+const THING: [&str; 13] = [
+    "the", "a", "an", "your", "my", "our", "their", "its", "his", "her", "each", "every", "per",
+];
+
+/// Words that make a sentence describe a file that is there already, so a
+/// header or keys it gives are that file's and no output's.
+const GIVEN: [&str; 4] = ["input", "inputs", "source", "existing"];
+
+/// Words that make the columns or keys a sentence lists ones to leave out or
+/// to sort or group by, as in "Drop the columns: tmp,debug", so they are no
+/// output's header or keys.
+const NOT_KEPT: [&str; 9] = [
+    "drop",
+    "exclude",
+    "ignore",
+    "omit",
+    "strip",
+    "redact",
+    "group by",
+    "sort by",
+    "not include",
+];
+
+/// The kinds of file a request may give a field's values for: its tables
+/// and data files.
+const RECORDS: [&str; 8] = ["csv", "tsv", "xls", "xlsx", "json", "jsonl", "yaml", "yml"];
+
+/// Words that make the values a sentence lists for a field a start or only
+/// examples, as in "such as `ok` or `late`", rather than all it may hold.
+const OPEN: [&str; 4] = ["such as", "like", "etc", "including"];
+
+/// Words that make what a sentence says a field or a list's items hold true
+/// only of some, as in "If it is late, `status` must be one of ...".
+const CONDITIONS: [&str; 5] = ["if", "when", "whenever", "unless", "otherwise"];
+
+/// Words that may come between a field's "be" and its values, as in "must
+/// be exactly one of" or "can only be".
+const QUALIFIERS: [&str; 5] = ["exactly", "only", "always", "strictly", "any"];
+
+/// Words before "be" that make it say what a field holds, as in "must be"
+/// or "has to be".
+const MODALS: [&str; 7] = ["must", "should", "shall", "will", "can", "may", "to"];
+
+/// Words a field is called by besides its name, as in "the status column",
+/// so its name is the word before.
+const NOUNS: [&str; 4] = ["column", "field", "key", "value"];
+
+/// Words after "each item" that list what every item holds, as in "each
+/// item must include" or "each entry has".
+const HAVING: [&str; 10] = [
+    "include", "includes", "contain", "contains", "have", "has", "hold", "holds", "with", "carry",
+];
+
+/// Words between "each" and a `HAVING` one that make what follows not hold
+/// of every item, as in "each item may include".
+const HEDGES: [&str; 9] = [
+    "may",
+    "can",
+    "could",
+    "might",
+    "not",
+    "never",
+    "optionally",
+    "if",
+    "when",
+];
+
+/// The items of a list, as "an array of objects with" names them.
+const PLURALS: [&str; 6] = ["objects", "records", "items", "entries", "elements", "rows"];
+
+/// Words that say the columns a sentence names come in the order given.
+const ORDER: [&str; 7] = [
+    "in order",
+    "in this order",
+    "in that order",
+    "in the order",
+    "same order",
+    "exact order",
+    "and order",
+];
+
+/// Words that ask for what a file must say, as in "Mention `rule_id`" or
+/// "must explicitly cover: CLAIM-1".
+const COVERING: [&str; 3] = ["cover", "mention", "reference"];
+
+/// Words that may come between "must" and a `COVERING` word, as in "must
+/// also mention" or "must explicitly cover".
+const ADVERBS: [&str; 3] = ["also", "explicitly", "clearly"];
+
+/// Words that name a list of words to use, as in "Use the verbs soften and
+/// remove" or "remediation verbs soften/remove".
+const WORDING: [&str; 6] = ["words", "terms", "verbs", "word", "term", "verb"];
+
+/// Words that make a name after them stand for each of many, as "every
+/// claim_id" does, so it is no term to write as it is.
+const EACH: [&str; 5] = ["each", "every", "any", "all", "per"];
+
+/// The most a range such as "CLAIM-1 … CLAIM-7" may span to be read as
+/// each of its names; a longer one is likely no list.
+const SPAN: u32 = 20;
+
+/// The kinds of file whose text is read for the words in it: all but Office
+/// files and pictures.
+const READABLE: [&str; 7] = ["md", "txt", "json", "jsonl", "csv", "yaml", "yml"];
+
+/// Words for the wording a list forbids, as in "Do not include the phrases:"
+/// or "Do not use these words:".
+const PHRASING: [&str; 7] = [
+    "phrase", "phrases", "word", "words", "term", "terms", "wording",
+];
+
+/// Words for putting wording in a file that a list after them forbids, as
+/// "Do not state:" or "Do not include the phrases:" do.
+const SAYING: [&str; 5] = ["include", "use", "write", "say", "state"];
+
+/// The `SAYING` words whose list is of things said even with no word for
+/// wording before it, as in "Do not state:".
+const STATING: [&str; 2] = ["state", "say"];
+
+/// Words that turn a `SAYING` word after them into a ban, as in "Do not" or
+/// "must never".
+const NOTS: [&str; 4] = ["not", "never", "don't", "dont"];
+
+/// The last words of a JSON key whose value is codes, as `policy_basis` and
+/// `risk_level` are, when an input's column of that name holds codes.
+const CODED: [&str; 8] = [
+    "flag", "flags", "code", "codes", "status", "basis", "level", "type",
+];
+
+/// The last words of a JSON key for a list of flags or codes, which may
+/// hold the names a markdown input gives, as `manual_review_needed`.
+const FLAGS: [&str; 4] = ["flag", "flags", "code", "codes"];
+
+/// Words that say a field holds nothing, longest first, as in "or
+/// empty/null for" or "leave `note` blank when".
+const EMPTY: [&str; 7] = [
+    "empty/null",
+    "null/empty",
+    "empty or null",
+    "null or empty",
+    "empty",
+    "null",
+    "blank",
+];
+
+/// Words after an `EMPTY` one that say in which records, as "for" does in
+/// "null for missing rows"; not "unless", which means the others.
+const WHEN: [&str; 5] = ["for", "when", "whenever", "if", "where"];
+
+/// Words that may come between a field and an `EMPTY` word after it, as in
+/// "`note` must be left empty" or "set `note` to null".
+const BEING: [&str; 11] = [
+    "be", "is", "are", "to", "left", "kept", "stay", "remain", "must", "should", "shall",
+];
+
+/// The last words of a key or column that say it names a file, as in
+/// `winning_source`, `source_file` or `superseded_sources`.
+const NAMING: [&str; 6] = ["source", "sources", "file", "files", "path", "paths"];
+
+/// The most entries under `in/` looked at to know which files are there:
+/// more than a task hands over, and past them a path goes unchecked.
+const LOOKED: usize = 5_000;
+
+/// Words that, said with "id" or "ids", ask a run to make ids of its own,
+/// as in "assign each finding an id" or "use stable decision IDs".
+const MINTING: [&str; 14] = [
+    "assign",
+    "assigned",
+    "assigning",
+    "generate",
+    "generated",
+    "generating",
+    "create",
+    "created",
+    "new",
+    "stable",
+    "unique",
+    "own",
+    "sequential",
+    "numbered",
+];
+
+/// Bad lines reported for one file: three show the pattern, and more would
+/// crowd out the other files.
+const LINES: usize = 3;
+
+/// Problems one notice lists, so a run with every file wrong still gets a
+/// notice short enough to act on.
+const LISTED: usize = 12;
+
+/// The largest file read to check its format, 16 MiB; past that only being
+/// there is checked, so a huge output does not hold up the run's end.
+const LARGEST: u64 = 16 << 20;
+
+/// The characters of a value a notice shows: enough for any label, and a
+/// sentence written where a label belongs does not crowd out the rest.
+const SHOWN: usize = 40;
+
+/// What a request asks a run to leave in its workspace.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Contract {
+    outputs: Vec<Output>,
+}
+
+impl Contract {
+    /// Whether `word` names a file this asks for, as the request may write
+    /// it: from `workspace`, in full by any spelling of it, or by name.
+    pub(crate) fn covers(&self, word: &str, workspace: &Path) -> bool {
+        named(word, &self.outputs, workspace).is_some()
+    }
+}
+
+/// One file a request asks for, and what it spells out about the content.
+#[derive(Debug, PartialEq)]
+struct Output {
+    /// From the workspace, with forward slashes, as `out/report.csv`.
+    path: String,
+    /// The CSV header the request gives word for word.
+    header: Option<String>,
+    /// Keys the request says the JSON holds.
+    keys: Vec<String>,
+    /// Keys the request says each item of a list in the JSON holds, a set
+    /// for each list it speaks of.
+    each: Vec<Vec<String>>,
+    /// Columns the request names in prose rather than as a header line.
+    columns: Vec<String>,
+    /// Whether the request says those columns come in the order given.
+    ordered: bool,
+    /// The fields the request says hold one of the values it lists.
+    values: Vec<Values>,
+    /// Names and words the request says the file must have in it, as it
+    /// writes them.
+    terms: Vec<String>,
+    /// Phrases the request or a file it names to read forbids the file to
+    /// hold.
+    forbidden: Vec<String>,
+    /// The codes the files the request names to read hold bare.
+    codes: Vec<Codes>,
+    /// The fields the request says to leave empty in records a code marks.
+    empty: Vec<Empty>,
+    /// The files under `in/` and how the inputs write their paths, which a
+    /// field naming a source is held to.
+    sources: Sources,
+    /// The fields for ids the request names and the ids given to the run,
+    /// which such a field's values are held to.
+    ids: Ids,
+    /// The file's size and change time as the request was read, if it was
+    /// there then.
+    found: Option<Stamp>,
+}
+
+/// A field the request says holds one of the values it lists.
+#[derive(Debug, PartialEq)]
+struct Values {
+    /// The column or key, as the request writes it.
+    field: String,
+    /// Every value it may hold.
+    allowed: Vec<String>,
+    /// Whether each value was in quotes or backticks, so is matched as
+    /// written; a bare word may be capitalised, as prose is.
+    quoted: bool,
+}
+
+/// Codes an input holds bare, as CLAIM-1 or `manual_review_needed`.
+#[derive(Clone, Debug, PartialEq)]
+struct Codes {
+    /// The input, as `in/terms.csv`.
+    input: String,
+    /// The column of a CSV input holding nothing but them, or None for the
+    /// names a markdown input gives in backticks.
+    column: Option<String>,
+    /// Each code, as the input writes it.
+    codes: Vec<String>,
+}
+
+/// A field the request says to leave empty in the records a code marks, as
+/// "`applicable_policy`: a path, or empty/null for true insufficient
+/// evidence" does where `decision` is `insufficient_evidence`.
+#[derive(Debug, PartialEq)]
+struct Empty {
+    /// The column or key, as the request writes it.
+    field: String,
+    /// The code marking such a record: another field's value, or the name
+    /// of a field that is true.
+    code: String,
+    /// The request's words for it, as "empty/null for true insufficient
+    /// evidence".
+    said: String,
+}
+
+/// The files under `in/` and the paths the inputs write for them, as an
+/// appendix writes `sources/a.md` for `in/sources/a.md`.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Sources {
+    /// Each file under `in/`, from the workspace, as `in/sources/a.md`.
+    files: HashSet<String>,
+    /// For each file an input writes a path for with a folder in it, each
+    /// such path and the input writing it.
+    written: BTreeMap<String, Vec<(String, String)>>,
+}
+
+/// The fields for ids a request names, as `blocker_ids`, and the ids the
+/// inputs and the request give, which a run's own ids are told from.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Ids {
+    /// Each field for ids the request names, none where it asks for ids to
+    /// be made.
+    fields: Vec<String>,
+    /// Each word reading as an id in the request, the files under `in/` and
+    /// their paths, in lower case.
+    given: HashSet<String>,
+}
+
+/// A file's size and the time it was last changed, where the system keeps one.
+type Stamp = (u64, Option<SystemTime>);
+
+/// The values a field has in a file, gathered by where in it each is, with
+/// the line each is on where that is known.
+type Places<'a> = BTreeMap<String, Vec<(Option<usize>, Cow<'a, str>)>>;
+
+/// One record holding a field for ids: the line it is on where known, the
+/// field's value, and the text each of its other fields holds.
+type Cited<'a> = (Option<usize>, &'a str, Vec<(&'a str, &'a str)>);
+
+/// One CSV record: the line it starts on, counting from 1, and its fields.
+struct Record {
+    line: usize,
+    fields: Vec<String>,
+}
+
+/// The files `text` names under `workspace`'s `out/`, in full or as
+/// `out/...`, with the header and keys it gives for each.
+pub(crate) fn from_request(text: &str, workspace: &Path) -> Contract {
+    let lines = typed(text);
+    let raw: Vec<&str> = crate::references::typed(text).lines().collect();
+    let mut outputs: Vec<Output> = Vec::new();
+    // Whether the list going on is under a heading such as "Read:" or "Do
+    // not create these yet:", so its items are inputs, which a later round
+    // may well have been told to remove, or files for later; or under one
+    // such as "Outputs:", so its items are to be made.
+    let (mut inputs, mut wanted) = (false, false);
+    // An item heading a list of its own that keeps it out, as "- Not yet:"
+    // does: how far in it is, and the state to go back to after its list.
+    let mut held: Option<(usize, (bool, bool))> = None;
+    for line in &lines {
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
+        // A line no further in than that item is past its list.
+        if let Some((at, state)) = held
+            && !trimmed.is_empty()
+            && indent <= at
+        {
+            (inputs, wanted) = state;
+            held = None;
+        }
+        let item = listed(line);
+        let sentences = sentences(line);
+        for sentence in &sentences {
+            let asked = (item && wanted) || says(sentence, &MAKING);
+            if !asked || (item && inputs) || left_out(sentence) {
+                continue;
+            }
+            let lower = sentence.to_ascii_lowercase();
+            let example = EXAMPLES.iter().filter_map(|words| lower.find(words)).min();
+            let before = &sentence[..example.unwrap_or(sentence.len())];
+            // Whether the last of those words so far takes a file to use, so
+            // the ones named after it are not made, until a making word.
+            let mut using = false;
+            let lead = std::iter::once("").chain(words(before));
+            for (previous, word) in lead.zip(words(before)) {
+                let cue = word.to_lowercase();
+                let previous = previous.to_lowercase();
+                // After "the", "a" or "your", as in "the load report" or
+                // "write your review to", a word that could take a file
+                // names a thing.
+                let thing = THING.contains(&previous.as_str());
+                let uses = USING.contains(&cue.as_str()) && !thing;
+                if uses || MAKING.contains(&cue.as_str()) || MAKES.contains(&cue.as_str()) {
+                    using = uses;
+                    continue;
+                }
+                // As in "out/a.json but not out/b.json" or "no out/b.json".
+                let not = ["not", "no"].contains(&previous.as_str());
+                // A path elsewhere is as often an input, or a file code the run
+                // writes is to make when it runs, so it counts only where the
+                // sentence asks for it outright.
+                let elsewhere = || elsewhere(word, workspace).filter(|_| asks_for(before, word));
+                let path = output_path(word, workspace).or_else(elsewhere);
+                let Some(path) = path.filter(|_| !using && !not) else {
+                    continue;
+                };
+                if !outputs.iter().any(|output| output.path == path) {
+                    let found = stamp(&workspace.join(&path));
+                    outputs.push(Output {
+                        path,
+                        header: None,
+                        keys: Vec::new(),
+                        each: Vec::new(),
+                        columns: Vec::new(),
+                        ordered: false,
+                        values: Vec::new(),
+                        terms: Vec::new(),
+                        forbidden: Vec::new(),
+                        codes: Vec::new(),
+                        empty: Vec::new(),
+                        sources: Sources::default(),
+                        ids: Ids::default(),
+                        found,
+                    });
+                }
+            }
+        }
+        // An indented line goes on with the item above it, under the same
+        // heading.
+        let nested = line.starts_with(char::is_whitespace);
+        // An item heading a list to keep out holds the state off for the
+        // lines under it; inside another such list they are out already.
+        let heads = item && held.is_none() && trimmed.ends_with(':');
+        if heads && sentences.last().is_some_and(|last| holds(last)) {
+            held = Some((indent, (inputs, wanted)));
+            (inputs, wanted) = (true, false);
+        }
+        if !item && !nested && !trimmed.is_empty() {
+            let heading = sentences.last().filter(|_| trimmed.ends_with(':'));
+            inputs = heading.is_some_and(|last| holds(last));
+            wanted = heading.is_some_and(|last| {
+                let plain = plain(last);
+                let names = |word: &str| plain.contains(&format!(" {word}"));
+                let making = says(last, &MAKING)
+                    || ["output", "deliverable", "artifact"].into_iter().any(names);
+                making && !holds(last)
+            });
+        }
+    }
+    // A header belongs to the one table its sentence names, or else to the
+    // table named last before it, and keys likewise to a data file, and the
+    // values a field holds to either; and to no output when that one is an
+    // input or not a CSV or JSON file, which the request may well describe
+    // the same way, nor when the sentence giving them is about a file
+    // already there.
+    let (mut table, mut data, mut record) = (None, None, None);
+    // The names in code form the request uses, one of which a condition
+    // such as "for true insufficient evidence" may mean.
+    let names = code_names(&lines);
+    // The heading of the list going on, when it makes what its items say a
+    // field holds true of some rows only, as "For late rows:" does: how far
+    // in it is, and whether it is an item itself.
+    let mut some_rows: Option<(usize, bool)> = None;
+    // The output the section or item going on is about, as "Requirements
+    // for notes.md:" or an item naming it heads the lines under it: how far
+    // in it is, whether it is an item, and which output.
+    let mut topic: Option<(usize, bool, usize)> = None;
+    // Wording forbidden in a section about no one output, so in every one.
+    let mut everywhere: Vec<String> = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        // A line of its own on another output, such as "report.md
+        // requirements:", is no longer about the table or data file before
+        // it; an item is, since a list may name the table's siblings before
+        // its header.
+        if !listed(line) {
+            for i in words(line).filter_map(|word| named(word, &outputs, workspace)) {
+                let other = kind(&outputs[i].path);
+                table = table.filter(|_| TABLES.contains(&other.as_str()));
+                data = data.filter(|_| DATA.contains(&other.as_str()));
+                record = record.filter(|_| RECORDS.contains(&other.as_str()));
+            }
+        }
+        if !line.trim().is_empty() {
+            let indent = line.len() - line.trim_start().len();
+            // An item's list ends at a line no further in than it, and a
+            // heading's at the next line that is neither an item nor in.
+            if let Some((from, item)) = some_rows
+                && (if item {
+                    indent <= from
+                } else {
+                    !listed(line) && indent == 0
+                })
+            {
+                some_rows = None;
+            }
+            let last = sentences(line).last().copied().unwrap_or_default();
+            if some_rows.is_none() && line.trim_end().ends_with(':') && conditional(last) {
+                some_rows = Some((indent, listed(line)));
+            }
+            if let Some((from, item, _)) = topic
+                && (if item {
+                    indent <= from
+                } else {
+                    !listed(line) && indent == 0
+                })
+            {
+                topic = None;
+            }
+            // Not an item inside one going on, which may name a file to
+            // take something from.
+            if topic.is_none()
+                && (listed(line) || line.trim_end().ends_with(':'))
+                && let [one] = outputs_in(line, &outputs, workspace)[..]
+            {
+                topic = Some((indent, listed(line), one));
+            }
+        }
+        for word in words(line) {
+            let kind = kind(word);
+            if TABLES.contains(&kind.as_str()) {
+                table = named(word, &outputs, workspace);
+            } else if DATA.contains(&kind.as_str()) {
+                data = named(word, &outputs, workspace);
+            }
+            if RECORDS.contains(&kind.as_str()) {
+                record = named(word, &outputs, workspace);
+            }
+        }
+        // A sentence naming files, none of them a table, is about those: a
+        // header in it is theirs, as one on a report.md item is, and not the
+        // table's named before; so too for keys and the data file. One that
+        // names no file is about those its line names.
+        let files = |text: &str| -> Vec<String> {
+            words(text)
+                .map(kind)
+                .filter(|kind| KINDS.contains(&kind.as_str()) || TABLES.contains(&kind.as_str()))
+                .collect()
+        };
+        let about = |sentence: &str, group: &[&str]| {
+            let mut kinds = files(sentence);
+            if kinds.is_empty() {
+                kinds = files(line);
+            }
+            kinds.is_empty() || kinds.iter().any(|kind| group.contains(&kind.as_str()))
+        };
+        // A table in a README or in markdown may go unnamed, so a header in
+        // a sentence naming no file but one of those is no CSV's.
+        let document = |sentence: &str| files(sentence).is_empty() && says(sentence, &DOCUMENT);
+        let under = || listed_under(&raw, &lines, at);
+        for sentence in sentences(line).into_iter().filter(|s| !given(s)) {
+            if let Some(i) = bound(sentence, &TABLES, table, &outputs, workspace)
+                && kind(&outputs[i].path) == "csv"
+                && outputs[i].header.is_none()
+                && about(sentence, &TABLES)
+                && !document(sentence)
+            {
+                outputs[i].header = header_in(sentence, next_line(&raw, &lines, at));
+                // A header given word for word names every column already.
+                if outputs[i].header.is_none() && outputs[i].columns.is_empty() {
+                    (outputs[i].columns, outputs[i].ordered) = columns_in(sentence, under);
+                }
+            }
+            if let Some(i) = bound(sentence, &DATA, data, &outputs, workspace)
+                && matches!(kind(&outputs[i].path).as_str(), "json" | "jsonl")
+                && about(sentence, &DATA)
+            {
+                let each = each_keys_in(sentence);
+                let keys = keys_in(sentence)
+                    .into_iter()
+                    .filter(|key| !each.contains(key));
+                outputs[i].keys.extend(keys);
+                if !each.is_empty() {
+                    outputs[i].each.push(each);
+                }
+            }
+            if some_rows.is_none()
+                && let Some(i) = bound(sentence, &RECORDS, record, &outputs, workspace)
+                && matches!(kind(&outputs[i].path).as_str(), "csv" | "json" | "jsonl")
+                && about(sentence, &RECORDS)
+                && !document(sentence)
+                && let Some(values) = values_in(sentence, under)
+            {
+                outputs[i].values.push(values);
+            }
+            if some_rows.is_none()
+                && let Some(i) = bound(sentence, &RECORDS, record, &outputs, workspace)
+                && matches!(kind(&outputs[i].path).as_str(), "csv" | "json" | "jsonl")
+                && about(sentence, &RECORDS)
+                && let Some(empty) = empty_in(sentence, &names)
+            {
+                outputs[i].empty.push(empty);
+            }
+        }
+        // Not only the sentences `given` leaves, since "Use the verbs soften
+        // and remove" names words to use, not files to remove.
+        for sentence in sentences(line) {
+            let terms = terms_in(sentence);
+            if terms.is_empty() {
+                continue;
+            }
+            let topic = topic.map(|(.., i)| i);
+            let Some(i) = subject(sentence, line, topic, &outputs, workspace) else {
+                continue;
+            };
+            for term in terms {
+                if !outputs[i].terms.contains(&term) {
+                    outputs[i].terms.push(term);
+                }
+            }
+        }
+        // Wording a list forbids holds for the output its section is about,
+        // and for every one when it is in none, as under "Forbidden:".
+        let phrases = forbidden_at(&lines, at);
+        if !phrases.is_empty() {
+            let topic = topic.map(|(.., i)| i);
+            if topic.is_none() && outputs_in(line, &outputs, workspace).is_empty() {
+                everywhere.extend(phrases);
+            } else if let Some(i) = subject(line, line, topic, &outputs, workspace) {
+                forbid(&mut outputs[i], &phrases);
+            }
+        }
+    }
+    // The files under `in/`, looked for only where an output has fields
+    // that may name one, and the paths the inputs write for them.
+    let mut known = Sources::default();
+    let fielded = |output: &Output| matches!(kind(&output.path).as_str(), "csv" | "json" | "jsonl");
+    if outputs.iter().any(fielded) {
+        known.files = files_under(workspace);
+    }
+    // A file named to read may list what not to state, as a policy's
+    // judgments never to write do, and that holds for every output too.
+    let (mut sources, mut codes) = (Vec::new(), Vec::new());
+    for input in crate::inputs::named(crate::references::typed(text), workspace) {
+        let file = workspace.join(&input);
+        let small = std::fs::metadata(&file).is_ok_and(|meta| meta.len() <= LARGEST);
+        let Some(content) = small.then(|| std::fs::read_to_string(&file).ok()).flatten() else {
+            continue;
+        };
+        codes.extend(codes_in(&input, &content));
+        written_in(&input, &content, &mut known);
+        let lines: Vec<&str> = content.lines().collect();
+        let stated: Vec<String> = (0..lines.len())
+            .flat_map(|at| stated_at(&lines, at))
+            .collect();
+        if stated.is_empty() {
+            sources.push(content.to_lowercase());
+        }
+        everywhere.extend(stated);
+    }
+    // Not what a source holds as well, since an output may have to quote it;
+    // only a list for one output's own section forbids that.
+    everywhere.retain(|phrase| {
+        let phrase = phrase.to_lowercase();
+        !sources.iter().any(|source| holds_word(source, &phrase))
+    });
+    // The ids given to the run, read only where the request names a field
+    // for ids and does not ask for ids to be made.
+    let mut ids = Ids::default();
+    if outputs.iter().any(fielded) && !minting(&lines) {
+        ids.fields = id_fields(crate::references::typed(text));
+    }
+    if !ids.fields.is_empty() {
+        match given_ids(text, workspace, &known.files) {
+            Some(given) => ids.given = given,
+            // An input left unread may give any id.
+            None => ids.fields.clear(),
+        }
+    }
+    for output in &mut outputs {
+        forbid(output, &everywhere);
+        if matches!(kind(&output.path).as_str(), "csv" | "json" | "jsonl") {
+            output.codes = codes.clone();
+            output.sources = known.clone();
+            output.ids = ids.clone();
+        }
+    }
+    Contract { outputs }
+}
+
+/// Whether `lines` ask for ids to be made rather than taken from the
+/// inputs, as "assign each finding an id", "use stable decision IDs" or "ids
+/// such as F-1" do.
+fn minting(lines: &[&str]) -> bool {
+    let ids = ["id", "ids", "identifier", "identifiers"];
+    lines
+        .iter()
+        .flat_map(|line| sentences(line))
+        .any(|sentence| {
+            let lower = sentence.to_ascii_lowercase();
+            let example = EXAMPLES.iter().any(|words| lower.contains(words));
+            says(sentence, &ids) && (example || says(sentence, &OPEN) || says(sentence, &MINTING))
+        })
+}
+
+/// The fields for ids `text` names, each once, as `blocker_ids` or
+/// `claim-id`; not a bare `id`, which a record of the run's own may have.
+fn id_fields(text: &str) -> Vec<String> {
+    let mut fields: Vec<String> = Vec::new();
+    for word in text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')) {
+        let word = word.trim_matches(['-', '_']);
+        if word.contains(['-', '_']) && id_named(word) && !fields.iter().any(|known| known == word)
+        {
+            fields.push(word.to_owned());
+        }
+    }
+    fields
+}
+
+/// The words reading as ids in `request` and in the files under
+/// `workspace`'s `in/`, their text and their paths, in lower case; None
+/// where the files run past `LARGEST` in all or one will not open, since an
+/// input left unread may give any id.
+fn given_ids(request: &str, workspace: &Path, files: &HashSet<String>) -> Option<HashSet<String>> {
+    let mut given: HashSet<String> = id_words(request).collect();
+    let mut read = 0;
+    for file in files {
+        let path = workspace.join(file);
+        read += std::fs::metadata(&path).ok()?.len();
+        if read > LARGEST {
+            return None;
+        }
+        given.extend(id_words(file));
+        given.extend(id_words(&String::from_utf8_lossy(
+            &std::fs::read(&path).ok()?,
+        )));
+    }
+    Some(given)
+}
+
+/// The words of `text` reading as ids, in lower case, as `rr-7` is in
+/// `in/risks.csv#RR-7`.
+fn id_words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+        .map(|word| word.trim_matches(['-', '_']))
+        .filter(|word| id_like(word))
+        .map(str::to_lowercase)
+}
+
+/// The codes `content`, the input file `input`, holds bare: each column of
+/// a CSV whose every value is one, as a `policy_basis` column of CLAIM-1
+/// and CLAIM-4 is, or the names in snake case a markdown file gives in
+/// backticks.
+fn codes_in(input: &str, content: &str) -> Vec<Codes> {
+    let code = |value: &str| identifier(value) || snake_case(value);
+    let mut found = Vec::new();
+    match kind(input).as_str() {
+        "csv" => {
+            let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+            let Ok(records) = records(content) else {
+                return found;
+            };
+            let Some((head, rows)) = records.split_first() else {
+                return found;
+            };
+            for (at, column) in head.fields.iter().enumerate() {
+                let mut codes: Vec<String> = Vec::new();
+                let cells = rows.iter().filter_map(|row| row.fields.get(at));
+                for cell in cells
+                    .map(|cell| cell.trim())
+                    .filter(|cell| !cell.is_empty())
+                {
+                    if !code(cell) {
+                        codes.clear();
+                        break;
+                    }
+                    if !codes.iter().any(|known| known == cell) {
+                        codes.push(cell.to_owned());
+                    }
+                }
+                if !codes.is_empty() {
+                    found.push(Codes {
+                        input: input.to_owned(),
+                        column: Some(column.trim().to_owned()),
+                        codes,
+                    });
+                }
+            }
+        }
+        "md" => {
+            let mut codes: Vec<String> = Vec::new();
+            // Line by line, so a backtick left open ends with its line.
+            for line in content.lines() {
+                for name in line.split('`').skip(1).step_by(2) {
+                    if snake_case(name) && !codes.iter().any(|known| known == name) {
+                        codes.push(name.to_owned());
+                    }
+                }
+            }
+            if !codes.is_empty() {
+                found.push(Codes {
+                    input: input.to_owned(),
+                    column: None,
+                    codes,
+                });
+            }
+        }
+        _ => {}
+    }
+    found
+}
+
+/// The files under `workspace`'s `in/`, from the workspace with `/` between
+/// folders, as far as `LOOKED` entries go; a link is left out, as it leads
+/// elsewhere.
+fn files_under(workspace: &Path) -> HashSet<String> {
+    let mut files = HashSet::new();
+    let (mut folders, mut looked) = (vec![workspace.join("in")], 0);
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            looked += 1;
+            if looked > LOOKED {
+                return files;
+            }
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => folders.push(path),
+                Ok(kind) if kind.is_file() => {
+                    if let Ok(inside) = path.strip_prefix(workspace) {
+                        let parts: Vec<_> =
+                            inside.iter().map(|part| part.to_string_lossy()).collect();
+                        files.insert(parts.join("/"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    files
+}
+
+/// Adds to `known` the paths `content`, the input `input`, writes for files
+/// under `in/` with a folder in them, as `sources/a.md`; a name alone may be
+/// from the input's own folder.
+fn written_in(input: &str, content: &str, known: &mut Sources) {
+    if known.files.is_empty() {
+        return;
+    }
+    for word in words(content) {
+        let path = word.split('#').next().unwrap_or_default();
+        let path = path.strip_prefix("./").unwrap_or(path);
+        if !path.contains('/') {
+            continue;
+        }
+        let Some(file) = input_file(path, &known.files) else {
+            continue;
+        };
+        let forms = known.written.entry(file).or_default();
+        if !forms.iter().any(|(form, _)| form == path) {
+            forms.push((path.to_owned(), input.to_owned()));
+        }
+    }
+}
+
+/// The file among `files` that `path` names, from the workspace or from
+/// `in/`, as `in/a.md` and `a.md` both name `in/a.md`.
+fn input_file(path: &str, files: &HashSet<String>) -> Option<String> {
+    let path = path.strip_prefix("./").unwrap_or(path);
+    if files.contains(path) {
+        return Some(path.to_owned());
+    }
+    let inside = format!("in/{path}");
+    files.contains(&inside).then_some(inside)
+}
+
+/// The names in code form `lines` use, each once: those in backticks, as
+/// `insufficient_evidence`, and words in snake case.
+fn code_names(lines: &[&str]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in lines {
+        let quoted = line
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|name| code_like(name));
+        let words = (line.split(|c: char| !(c.is_alphanumeric() || c == '_')))
+            .filter(|word| snake_case(word));
+        for name in quoted.chain(words) {
+            if !names.iter().any(|known| known == name) {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// The field `sentence` says to leave empty in the records a code marks,
+/// as "`applicable_policy`: a path, or empty/null for true insufficient
+/// evidence" or "leave `note` blank when `status` is `skipped`" do; None
+/// where the condition names none of `names` in a row of its words, nor a
+/// code in backticks, since then no record can be told to be one.
+fn empty_in(sentence: &str, names: &[String]) -> Option<Empty> {
+    let lower = sentence.to_ascii_lowercase();
+    for words in EMPTY {
+        for (at, _) in lower.match_indices(words) {
+            if !alone(&lower, at, words.len()) {
+                continue;
+            }
+            let after = sentence[at + words.len()..].trim_start();
+            let Some(rest) = WHEN.iter().find_map(|cue| word_after(after, cue)) else {
+                continue;
+            };
+            // The condition ends with its clause.
+            let start = sentence.len() - rest.len();
+            let end = start + rest.find([';', ',', ')']).unwrap_or(rest.len());
+            let condition = sentence[start..end].trim().trim_end_matches('.');
+            // "`F`: a path, or empty for ..." names the field before its
+            // colon; "leave `F` empty when ..." just before the word.
+            let field = match sentence.find(':') {
+                Some(colon) if colon < at => {
+                    field_before(&sentence[..=colon], true).map(|(field, _)| field)
+                }
+                _ => named_before(&sentence[..at]),
+            };
+            let (Some(field), Some(code)) = (field, marking(condition, names)) else {
+                continue;
+            };
+            let said = sentence[at..end].trim().trim_end_matches('.').to_owned();
+            return Some(Empty { field, code, said });
+        }
+    }
+    None
+}
+
+/// The field named just before `text` ends, past words such as "must be"
+/// or "to", as in "leave `note`" or "`note` must be", when it is in
+/// backticks or snake case, as a field is and a word of prose is not.
+fn named_before(text: &str) -> Option<String> {
+    let mut rest = text.trim_end();
+    while let Some(before) = without_last(rest, &BEING) {
+        rest = before;
+    }
+    let quoted = rest.ends_with('`');
+    let (_, name) = last_name(rest)?;
+    (quoted || snake_case(name)).then(|| name.to_owned())
+}
+
+/// The code `condition` speaks of: the last it gives in backticks, as in
+/// "when `status` is `skipped`", or else one of `names` whose words it has
+/// in a row, as "true insufficient evidence" has `insufficient_evidence`.
+fn marking(condition: &str, names: &[String]) -> Option<String> {
+    let quoted = condition
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|name| code_like(name));
+    if let Some(code) = quoted.last() {
+        return Some(code.to_owned());
+    }
+    let words: Vec<String> = (condition.split(|c: char| !c.is_alphanumeric()))
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    // Of two words or more, since one may be a word of prose, as "missing".
+    names
+        .iter()
+        .find(|name| {
+            let parts: Vec<String> = name.split(['_', '-']).map(str::to_lowercase).collect();
+            parts.len() > 1
+                && words
+                    .windows(parts.len())
+                    .any(|run| run == parts.as_slice())
+        })
+        .cloned()
+}
+
+/// Adds `phrases` to those `output` must not hold, each once.
+fn forbid(output: &mut Output, phrases: &[String]) {
+    for phrase in phrases {
+        if !output.forbidden.contains(phrase) {
+            output.forbidden.push(phrase.clone());
+        }
+    }
+}
+
+/// What is wrong with each file `contract` asks for, as it stands in
+/// `workspace` now, one problem each, naming its file.
+pub(crate) fn problems(contract: &Contract, workspace: &Path) -> Vec<String> {
+    contract
+        .outputs
+        .iter()
+        .flat_map(|output| {
+            let file = workspace.join(&output.path);
+            // One there before the run and as it was is as the user left it,
+            // and the request may only ask what is wrong with it.
+            if output.found.is_some() && stamp(&file) == output.found {
+                return Vec::new();
+            }
+            wrong(output, &file)
+        })
+        .collect()
+}
+
+/// The message that sends a run back to weigh `problems` against its
+/// request and to end with its whole answer again, since a request misread
+/// here would otherwise leave a note on this check in the answer's place.
+pub(crate) fn notice(problems: &[String]) -> String {
+    let brand = crate::BRAND;
+    let mut text = format!("[{brand} check] Before ending, compare these with the request:");
+    for problem in problems.iter().take(LISTED) {
+        text.push_str(&format!("\n- {problem}"));
+    }
+    if problems.len() > LISTED {
+        text.push_str(&format!("\n- and {} more.", problems.len() - LISTED));
+    }
+    text.push_str(
+        "\nFix the ones it asked for, in place; ignore any it did not ask for. Only your last message is passed on as your answer, so end with your whole answer again, not only what changed.",
+    );
+    text
+}
+
+/// The words of `text` with a folder in them that could name a file a run
+/// is to make: none inside code, a page quoted in or a diff pasted with no
+/// fence, under a heading such as "Read:" or an item such as "- Later:",
+/// after "e.g." in its sentence or straight after "not" or "no", or in a
+/// sentence that keeps its files out of the contract, or says they are
+/// optional or not needed. Line by line, so a caller with enough stops:
+/// a log pasted in may hold paths on every line, and reading a sentence for
+/// what keeps its files out takes a thousand looks.
+pub(crate) fn named_words(text: &str) -> impl Iterator<Item = &str> {
+    // Only here: leaving out more than the contract does costs no more than
+    // a check that never ran, while "Write out/a.json, optionally sorted"
+    // still asks the contract for its file.
+    const UNASKED: [&str; 2] = ["optionally", "no need for"];
+    let folder = |word: &str| word.contains(['/', '\\']);
+    // Whether the list going on is under a heading that keeps its files out.
+    let mut held = false;
+    // An item heading a list of its own that keeps it out: how far in it is.
+    let mut held_item: Option<usize> = None;
+    // Whether the lines going on are a hunk of a diff.
+    let mut hunk = false;
+    typed(text).into_iter().flat_map(move |line| {
+        let mut named = Vec::new();
+        // A diff's headers name the files it changes, and its hunks what
+        // they hold, which may be anything but a file to make.
+        let header = ["diff --git ", "--- ", "+++ "]
+            .iter()
+            .any(|mark| line.starts_with(mark));
+        let in_hunk = line.is_empty() || line.starts_with(['+', '-', ' ', '\\']);
+        hunk = line.starts_with("@@ ") || (hunk && in_hunk);
+        if header || hunk {
+            return named;
+        }
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
+        // A line no further in than that item is past its list.
+        if held_item.is_some_and(|at| !trimmed.is_empty() && indent <= at) {
+            held_item = None;
+        }
+        let item = listed(line);
+        let nested = line.starts_with(char::is_whitespace);
+        let sentences = sentences(line);
+        // In bold or not, as "**Not yet:**" is.
+        let heading = trimmed.trim_end_matches(['*', '_']).ends_with(':');
+        let holding = heading
+            && sentences
+                .last()
+                .is_some_and(|&last| holds(last) || says(last, &UNASKED));
+        if !item && !nested && !trimmed.is_empty() {
+            held = holding;
+        } else if held || held_item.is_some() {
+            return named;
+        }
+        if item && holding {
+            held_item = Some(indent);
+        }
+        for sentence in sentences {
+            // Most sentences name no path, and need not be read.
+            if !words(sentence).any(folder) || left_out(sentence) || says(sentence, &UNASKED) {
+                continue;
+            }
+            let lower = sentence.to_ascii_lowercase();
+            let example = EXAMPLES.iter().filter_map(|words| lower.find(words)).min();
+            let before = &sentence[..example.unwrap_or(sentence.len())];
+            // As in "out/a.json but not out/b.json" or "no out/b.json".
+            let not = |previous: &str| ["not", "no"].contains(&previous.to_lowercase().as_str());
+            let lead = std::iter::once("").chain(words(before));
+            let kept = lead
+                .zip(words(before))
+                .filter(|&(previous, word)| folder(word) && !not(previous));
+            named.extend(kept.map(|(_, word)| word));
+        }
+        named
+    })
+}
+
+/// The records of CSV `text` as Python's csv module reads them, or the line
+/// a quote that is never closed opened on.
+fn records(text: &str) -> Result<Vec<Record>, usize> {
+    // Python would quietly run the rest of the file into one field after a
+    // quote never closed, so its line is given instead, to say where to look.
+    let mut records = Vec::new();
+    let (mut fields, mut field) = (Vec::new(), String::new());
+    let (mut line, mut start, mut opened) = (1, 1, 1);
+    // `fresh` at a field's first character, where a quote opens quoting.
+    let (mut quoted, mut fresh, mut any) = (false, true, false);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if quoted {
+            match c {
+                '"' if chars.peek() == Some(&'"') => {
+                    chars.next();
+                    field.push('"');
+                }
+                '"' => quoted = false,
+                '\n' => {
+                    line += 1;
+                    field.push(c);
+                }
+                _ => field.push(c),
+            }
+            continue;
+        }
+        match c {
+            '"' if fresh => {
+                (quoted, opened, fresh, any) = (true, line, false, true);
+            }
+            ',' => {
+                fields.push(std::mem::take(&mut field));
+                (fresh, any) = (true, true);
+            }
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\n' | '\r' => {
+                if any {
+                    fields.push(std::mem::take(&mut field));
+                    let fields = std::mem::take(&mut fields);
+                    records.push(Record {
+                        line: start,
+                        fields,
+                    });
+                }
+                line += 1;
+                (start, fresh, any) = (line, true, false);
+            }
+            _ => {
+                field.push(c);
+                (fresh, any) = (false, true);
+            }
+        }
+    }
+    if quoted {
+        return Err(opened);
+    }
+    if any {
+        fields.push(field);
+        records.push(Record {
+            line: start,
+            fields,
+        });
+    }
+    Ok(records)
+}
+
+/// Whether `line` is an item of a list, marked or numbered.
+fn listed(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let number = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
+    let marker = if number.len() < trimmed.len() {
+        number.strip_prefix(['.', ')'])
+    } else {
+        trimmed.strip_prefix(['-', '*', '+'])
+    };
+    // A space after the mark, so a bold line such as "**Not yet:**" heads
+    // a list rather than being an item of the one before.
+    marker.is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+/// The sentences of `line`, each ended by a full stop, question mark or
+/// exclamation mark before a space: a path holds dots, but never one before a
+/// space, and "e.g." ends no sentence.
+fn sentences(line: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    for (at, _) in line.match_indices(['.', '?', '!']) {
+        let before = line[..at].to_ascii_lowercase();
+        let ends = line[at + 1..].starts_with(' ');
+        if !ends || before.ends_with("e.g") || before.ends_with("i.e") {
+            continue;
+        }
+        sentences.push(&line[start..at]);
+        start = at + 2;
+    }
+    sentences.push(&line[start..]);
+    sentences
+}
+
+/// The lines of `text` the user typed, with none of what `@` attached after
+/// them and each line of a fenced block -- code, a file or a page quoted in
+/// -- left blank, since the paths there are what it holds, not what is asked.
+fn typed(text: &str) -> Vec<&str> {
+    let tag = crate::untrusted::TAG;
+    let (opening, closing) = (format!("<{tag}-"), format!("</{tag}-"));
+    // The mark, backtick or tilde, and how many of it opened the code block
+    // going on, if one is, and whether words from outside are.
+    let (mut code, mut outside) = (None, false);
+    let mut lines = Vec::new();
+    for line in crate::references::typed(text).lines() {
+        let trimmed = line.trim();
+        let mark = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
+        let run = mark.map_or(0, |mark| {
+            trimmed.len() - trimmed.trim_start_matches(mark).len()
+        });
+        let fenced = if let Some((open, length)) = code {
+            // As many of its marks or more, alone, close it: an editor fences
+            // a file with more than its text holds, so the text cannot.
+            if mark == Some(open) && run >= length && run == trimmed.len() {
+                code = None;
+            }
+            true
+        } else if outside {
+            outside = !trimmed.starts_with(&closing);
+            true
+        } else if let Some(mark) = mark.filter(|&mark| run >= 3 && !trimmed[run..].contains(mark)) {
+            code = Some((mark, run));
+            true
+        } else {
+            outside = trimmed.starts_with(&opening);
+            outside
+        };
+        lines.push(if fenced { "" } else { line });
+    }
+    lines
+}
+
+/// Whether the files `sentence` names are not for this run to leave: to be
+/// left for later, out or alone, not made, or only read.
+fn left_out(sentence: &str) -> bool {
+    says(sentence, &NOT_NOW) || refused(sentence) || reads(sentence)
+}
+
+/// Whether a list's `heading` keeps the files under it out, as a `left_out`
+/// one or "Later:" does; only here, since "later" in a sentence may say what
+/// comes after a file made now.
+fn holds(heading: &str) -> bool {
+    left_out(heading) || says(heading, &["later"])
+}
+
+/// Whether `sentence` says not to make or change what it names, in any of
+/// the words for that.
+fn refused(sentence: &str) -> bool {
+    let plain = plain(sentence);
+    let said = |before: &str, word: &str| {
+        BETWEEN
+            .iter()
+            .any(|between| plain.contains(&format!(" {before} {between}{word} ")))
+    };
+    let verbs = || MAKING.iter().chain(&CHANGING);
+    NEGATING
+        .iter()
+        .any(|before| verbs().any(|verb| said(before, verb)))
+        || ["without", "avoid", "avoiding"]
+            .iter()
+            .any(|before| DOING.iter().any(|doing| said(before, doing)))
+}
+
+/// Whether `text` is about reading files and not about making any.
+fn reads(text: &str) -> bool {
+    says(text, &READING) && !says(text, &MAKING)
+}
+
+/// Whether `sentence` is about a file that is there already rather than one
+/// to make, or about columns or keys not to keep, as its words before any
+/// list or quote say.
+fn given(sentence: &str) -> bool {
+    // Not the list itself, which may well hold a column named `source`.
+    let lead = sentence.split([':', '`']).next().unwrap_or(sentence);
+    left_out(lead) || says(lead, &GIVEN) || says(lead, &NOT_KEPT)
+}
+
+/// Whether `text` says any of `words`, each whole.
+fn says(text: &str, words: &[&str]) -> bool {
+    let plain = plain(text);
+    words
+        .iter()
+        .any(|word| plain.contains(&format!(" {word} ")))
+}
+
+/// `text`'s words in lower case, one space apart and one at each end, so a
+/// phrase is found only whole: not "delete" in `delete_ids.txt`, nor any
+/// word of a path, such as a workspace in `/home/me/output-tools`.
+fn plain(text: &str) -> String {
+    let text = text.to_lowercase().replace('\u{2019}', "'");
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .filter(|word| !path_like(word))
+        .collect();
+    let spaced: String = words
+        .join(" ")
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || "_'".contains(c) {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    format!(
+        " {} ",
+        spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+    )
+}
+
+/// Whether `word` is a path rather than words joined by a slash, as in
+/// "read/write".
+fn path_like(word: &str) -> bool {
+    let word = word.trim_matches(|c: char| "`'\"()[]<>*,;:!?".contains(c));
+    let parts = || word.split(['/', '\\']);
+    parts().nth(1).is_some()
+        && (word.starts_with(['/', '\\', '~', '.', '$'])
+            || parts().any(|part| part.is_empty() || !part.chars().all(char::is_alphabetic)))
+}
+
+/// The words of `line` that could be paths or file names, with the
+/// markdown and punctuation around them taken off.
+pub(crate) fn words(line: &str) -> impl Iterator<Item = &str> {
+    line.split(|c: char| c.is_whitespace() || "`\"'()[],;".contains(c))
+        .map(|word| {
+            word.trim_start_matches('*')
+                .trim_end_matches(|c: char| "*:.!?".contains(c))
+        })
+        .filter(|word| !word.is_empty())
+}
+
+/// `word` as a path from the workspace, when it names a file of a known
+/// kind under the workspace's `out/`.
+fn output_path(word: &str, workspace: &Path) -> Option<String> {
+    let word = word.replace('\\', "/");
+    let word = word.strip_prefix("./").unwrap_or(&word);
+    let path = if word.starts_with("out/") {
+        word.to_owned()
+    } else {
+        let (at, _) = word
+            .match_indices("/out/")
+            .find(|(at, _)| same_folder(&word[..*at], workspace))?;
+        word[at + 1..].to_owned()
+    };
+    known_file(path)
+}
+
+/// `path`, from the workspace, when it names one file of a known kind.
+fn known_file(path: String) -> Option<String> {
+    // A placeholder such as `<warehouse>` names no one file.
+    let placeholder = path.contains(['<', '>', '{', '}', '$', '*', '?']);
+    let climbs = path.split('/').any(|part| part.is_empty() || part == "..");
+    (!placeholder && !climbs && KINDS.contains(&kind(&path).as_str())).then_some(path)
+}
+
+/// `word` as a path from the workspace, when it names a file of a known kind
+/// outside `out/` by its whole path: a name alone, or one from a folder, may
+/// mean `out/` or a folder named before it, which would be a guess.
+fn elsewhere(word: &str, workspace: &Path) -> Option<String> {
+    let word = word.replace('\\', "/");
+    if !Path::new(&word).is_absolute() {
+        return None;
+    }
+    let path = (word.match_indices('/'))
+        .find(|(at, _)| same_folder(&word[..*at], workspace))
+        .map(|(at, _)| word[at + 1..].to_owned())?;
+    known_file(path).filter(|path| !path.starts_with("out/"))
+}
+
+/// Whether `sentence` asks outright for the file `path` names: it opens with
+/// a making word, as "Write" or "Also create" do, that takes the path
+/// straight after it or after "to", "as" or "into" ending a few words of
+/// its own, and it holds no condition, as "when it is called" is.
+fn asks_for(sentence: &str, path: &str) -> bool {
+    let all: Vec<String> = words(sentence).map(str::to_lowercase).collect();
+    let Some(at) = words(sentence).position(|word| word == path) else {
+        return false;
+    };
+    // A list's mark, its number, or a word such as "also" before the verb.
+    let opens = all.iter().position(|word| {
+        word.chars().any(char::is_alphabetic) && !OPENERS.contains(&word.as_str())
+    });
+    // A heading such as "Read these to write the outputs:" makes its items
+    // asked for though they are read, so a path elsewhere needs its own verb.
+    let Some(verb) = opens.filter(|&verb| verb < at) else {
+        return false;
+    };
+    if !MAKING.contains(&all[verb].as_str())
+        || says(sentence, &["if", "when", "whenever", "unless"])
+    {
+        return false;
+    }
+    let between = &all[verb + 1..at];
+    // "Write a.json and b.json" names both.
+    if between
+        .iter()
+        .all(|word| word == "and" || word.contains('/'))
+    {
+        return true;
+    }
+    let Some((last, object)) = between.split_last() else {
+        return true;
+    };
+    // "Write a script that saves ..." or "a tool to export ..." asks for
+    // what makes the file, not the file.
+    let ordinary = |word: &String| {
+        word.chars().all(char::is_alphanumeric)
+            && ![MAKING.as_slice(), &MAKES, &USING, &CHANGING]
+                .iter()
+                .any(|kind| kind.contains(&word.as_str()))
+            && !["that", "which", "who", "so", "to"].contains(&word.as_str())
+    };
+    ["to", "as", "into"].contains(&last.as_str())
+        && object.len() <= OBJECT
+        && object.iter().all(ordinary)
+}
+
+/// Whether `given`, as a request writes it, is `workspace`, though either
+/// may go through a link, as macOS's /var does to /private/var.
+fn same_folder(given: &str, workspace: &Path) -> bool {
+    let own = workspace.to_string_lossy().replace('\\', "/");
+    if given == own.trim_end_matches('/') {
+        return true;
+    }
+    // Opening a path on Windows can sign in to another computer, and this
+    // one comes from the request's text.
+    if crate::paths::unsafe_raw(given, Some(workspace)).is_some() {
+        return false;
+    }
+    match (
+        std::fs::canonicalize(given),
+        std::fs::canonicalize(workspace),
+    ) {
+        (Ok(given), Ok(own)) => given == own,
+        _ => false,
+    }
+}
+
+/// Which output `word` names, by its path or by its name alone when only one
+/// output has that name, or None for any other file, such as an input.
+fn named(word: &str, outputs: &[Output], workspace: &Path) -> Option<usize> {
+    if let Some(path) = output_path(word, workspace).or_else(|| elsewhere(word, workspace)) {
+        return outputs.iter().position(|output| output.path == path);
+    }
+    if word.contains(['/', '\\']) {
+        return None;
+    }
+    let mut same = outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.path.rsplit('/').next() == Some(word));
+    match (same.next(), same.next()) {
+        (Some((i, _)), None) => Some(i),
+        _ => None,
+    }
+}
+
+/// The output a header or keys in `sentence` belong to: the one file of a
+/// `group` kind it names, as in "The header of a.csv is: id,name", or `last`,
+/// the one named last on its line or before, when it names none or several.
+fn bound(
+    sentence: &str,
+    group: &[&str],
+    last: Option<usize>,
+    outputs: &[Output],
+    workspace: &Path,
+) -> Option<usize> {
+    let mut files: Vec<Option<usize>> = words(sentence)
+        .filter(|word| group.contains(&kind(word).as_str()))
+        .map(|word| named(word, outputs, workspace))
+        .collect();
+    files.dedup();
+    match files[..] {
+        [one] => one,
+        _ => last,
+    }
+}
+
+/// The extension of `path`, in lower case, or nothing.
+fn kind(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// Where a header that line `at` leads to with a colon is: the next line not
+/// blank, as typed, or the first in a code block opening there.
+fn next_line<'a>(raw: &[&'a str], lines: &[&'a str], at: usize) -> Option<&'a str> {
+    let next = (at + 1..raw.len()).find(|&i| !raw[i].trim().is_empty())?;
+    // Left blank as typed, so the start of a code block or of a page; a
+    // header in a block is still the request's, though a path there is not.
+    let fence = raw[next].trim_start();
+    let opens = lines[next].is_empty() && (fence.starts_with("```") || fence.starts_with("~~~"));
+    if opens {
+        raw.get(next + 1).copied()
+    } else {
+        Some(lines[next])
+    }
+}
+
+/// The header `line` gives word for word, on the line itself or, when it
+/// ends in a colon, on `next`.
+fn header_in(line: &str, next: Option<&str>) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let says = ["header", "columns", "first row", "first line"];
+    // "Must include" names columns that are needed, not the whole header.
+    let partial = lower.contains("include") || lower.contains("contain");
+    if partial || !says.iter().any(|words| lower.contains(words)) {
+        return None;
+    }
+    let mut candidates: Vec<&str> = line.split('`').skip(1).step_by(2).collect();
+    candidates.extend(line.rsplit_once(':').map(|(_, rest)| rest));
+    if line.trim_end().ends_with(':') {
+        candidates.extend(next);
+    }
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            candidate
+                .trim()
+                .trim_matches(['`', '*'])
+                .trim_end_matches('.')
+        })
+        .find(|candidate| {
+            let fields: Vec<&str> = candidate.split(',').collect();
+            fields.len() > 1
+                && fields.iter().all(|field| {
+                    !field.is_empty()
+                        && field
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                })
+        })
+        .map(str::to_owned)
+}
+
+/// The keys `line` lists after "keys", up to its colon, as far as the items
+/// are plain keys.
+fn keys_in(line: &str) -> Vec<String> {
+    let lower = line.to_ascii_lowercase();
+    // As a word, so `idempotency_keys:` is not taken for a list of keys.
+    let start = lower.match_indices("keys").find(|(at, _)| {
+        lower[..*at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+    });
+    let Some((_, list)) = start.and_then(|(at, _)| line[at..].split_once(':')) else {
+        return Vec::new();
+    };
+    list.split(',')
+        .map(|item| {
+            let item = item.trim();
+            let item = item.strip_prefix("and ").unwrap_or(item);
+            item.trim_matches(|c: char| c.is_whitespace() || "`*\"'.".contains(c))
+        })
+        .take_while(|key| !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The keys `sentence` says each item of a list holds, as in "Each item must
+/// include `id` and `name`" or "an array of objects with id, name".
+fn each_keys_in(sentence: &str) -> Vec<String> {
+    let lower = sentence.to_ascii_lowercase();
+    // Where each word starts, to take the list from the sentence as typed.
+    let words: Vec<(usize, &str)> = lower
+        .split_ascii_whitespace()
+        .scan(0, |from, word| {
+            let at = *from + lower[*from..].find(word)?;
+            *from = at + word.len();
+            Some((at, word))
+        })
+        .collect();
+    let bare = |j: usize| words[j].1.trim_end_matches([':', ',']);
+    for i in 0..words.len() {
+        let verb = if ["each", "every"].contains(&words[i].1) {
+            // "Each line item must include", but not "each item may
+            // include" or "each ticket's `tags` include", whose list is of
+            // values.
+            let ordinary = |j: usize| {
+                !HEDGES.contains(&words[j].1)
+                    && words[j]
+                        .1
+                        .chars()
+                        .all(|c| c.is_ascii_alphabetic() || c == '-')
+            };
+            (i + 1..words.len().min(i + 6))
+                .take_while(|&j| HAVING.contains(&bare(j)) || ordinary(j))
+                .find(|&j| HAVING.contains(&bare(j)))
+        } else if ["array", "list"].contains(&words[i].1)
+            && words.get(i + 1).is_some_and(|w| w.1 == "of")
+        {
+            (i + 2..words.len().min(i + 5))
+                .find(|&j| words[j].1 == "with" && PLURALS.contains(&words[j - 1].1))
+        } else {
+            None
+        };
+        // "If there are returns, ... each item has" speaks of a list that
+        // may rightly not be there.
+        let Some(j) = verb.filter(|_| !conditional(&sentence[..words[i].0])) else {
+            continue;
+        };
+        let mut list = sentence[words[j].0 + words[j].1.len()..].trim_start();
+        for lead in ["at least", "the following", "these", "the"] {
+            list = word_after(list, lead).unwrap_or(list);
+        }
+        // "these keys (empty when unknown): id, name" gives them after its
+        // colon, unless they follow straight on.
+        let named = ["keys", "fields", "properties"].iter().find_map(|word| {
+            let rest = list.get(word.len()..)?;
+            let ends = rest.chars().next().is_none_or(|c| !c.is_alphanumeric());
+            (ends && list[..word.len()].eq_ignore_ascii_case(word)).then_some(rest)
+        });
+        if let Some(rest) = named {
+            list = match rest.split_once(':') {
+                Some((_, after)) if !rest.trim_start().starts_with(['`', '"']) => after,
+                _ => rest,
+            };
+        }
+        let keys = names(list.trim_start_matches([':', ' ']));
+        if !keys.is_empty() {
+            return keys;
+        }
+    }
+    Vec::new()
+}
+
+/// The names `text` lists first, as far as each is a plain name: "`id`,
+/// `name` and a note" gives id and name, and a choice, as in "`id` or
+/// `name`", gives none.
+fn names(text: &str) -> Vec<String> {
+    let clause = text.split(';').next().unwrap_or_default();
+    if says(clause, &["or"]) {
+        return Vec::new();
+    }
+    clause
+        .replace(" and ", ", ")
+        .split(',')
+        .map(|item| {
+            let item = item.trim();
+            let item = item.strip_prefix("and ").unwrap_or(item);
+            item.trim_matches(|c: char| c.is_whitespace() || "`*\"'.".contains(c))
+        })
+        .filter(|name| !name.is_empty())
+        .take_while(|name| {
+            name.chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The columns `sentence` names in prose, as in "with columns `id`, `name`
+/// and `total`", or on the lines `under` it when it ends in a colon, and
+/// whether it says they come in that order.
+fn columns_in(sentence: &str, under: impl Fn() -> String) -> (Vec<String>, bool) {
+    let lower = sentence.to_ascii_lowercase();
+    let cue = ["columns", "header"]
+        .into_iter()
+        .filter_map(|word| Some((whole(&lower, word)?, word)))
+        .min();
+    let Some((at, word)) = cue else {
+        return (Vec::new(), false);
+    };
+    let mut list = sentence[at + word.len()..].to_owned();
+    // "columns, in this order: id, name" gives them after its colon.
+    if let Some((before, after)) = list.split_once(':')
+        && !before.contains(['`', '"'])
+    {
+        list = after.to_owned();
+    }
+    if list.trim().is_empty() {
+        list = under();
+    }
+    let columns = names(&list);
+    if columns.len() < 2 {
+        return (Vec::new(), false);
+    }
+    // A header is a line, so its names have their order, unless all asked
+    // is that it include them.
+    let partial = lower.contains("include") || lower.contains("contain");
+    (
+        columns,
+        says(sentence, &ORDER) || (word == "header" && !partial),
+    )
+}
+
+/// Where `word` first stands whole in `text`, not inside a longer word.
+fn whole(text: &str, word: &str) -> Option<usize> {
+    text.match_indices(word)
+        .map(|(at, _)| at)
+        .find(|&at| alone(text, at, word.len()))
+}
+
+/// Whether the `len` bytes of `text` at `at` are a word of their own.
+fn alone(text: &str, at: usize, len: usize) -> bool {
+    text[..at]
+        .chars()
+        .next_back()
+        .is_none_or(|c| !c.is_alphanumeric())
+        && text[at + len..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric())
+}
+
+/// What line `at` leads to with a colon: the items of the list under it,
+/// joined with commas, or else the next line, as `next_line` finds it.
+fn listed_under(raw: &[&str], lines: &[&str], at: usize) -> String {
+    let Some(first) = (at + 1..raw.len()).find(|&i| !raw[i].trim().is_empty()) else {
+        return String::new();
+    };
+    if !listed(lines[first]) {
+        return next_line(raw, lines, at).unwrap_or_default().to_owned();
+    }
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    lines[first..]
+        .iter()
+        .take_while(|line| listed(line) && indent(line) == indent(lines[first]))
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let rest = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
+            let rest = rest.strip_prefix(['.', ')', '-', '*', '+']).unwrap_or(rest);
+            rest.trim()
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The field `sentence` says holds one of the values it lists, and those
+/// values, as in "`status` must be one of `ok`, `late` or `missing`",
+/// "status: one of ok, late" or "`kind` must be exactly `a` or `b`", taking
+/// them from the lines `under` it when it ends in a colon; None for a list
+/// of examples, one true of some rows only, or one with more in it than
+/// values.
+fn values_in(sentence: &str, under: impl Fn() -> String) -> Option<Values> {
+    let lower = sentence.to_ascii_lowercase();
+    if EXAMPLES.iter().any(|words| lower.contains(words)) || says(sentence, &OPEN) {
+        return None;
+    }
+    let mut cues: Vec<(usize, &str)> = ["one of", "either", "∈", "be", "is", "are"]
+        .into_iter()
+        .flat_map(|cue| lower.match_indices(cue))
+        .filter(|&(at, cue)| alone(&lower, at, cue.len()))
+        .collect();
+    cues.sort_unstable();
+    // The first that follows a field, since a sentence may say "one of" of
+    // something else first, as in "Pick one of the files and ...".
+    for (at, cue) in cues {
+        let end = at + cue.len();
+        // "Must be `a` or `b`" lists quoted values with no "one of".
+        let copula = matches!(cue, "be" | "is" | "are");
+        let lead = if copula {
+            &sentence[..end]
+        } else {
+            &sentence[..at]
+        };
+        let Some((field, before)) = field_before(lead, cue == "∈") else {
+            continue;
+        };
+        if conditional(before) {
+            return None;
+        }
+        let mut list = sentence[end..].trim_start();
+        if copula {
+            while let Some(rest) = QUALIFIERS.iter().find_map(|word| word_after(list, word)) {
+                list = rest;
+            }
+            if !list.starts_with(['`', '"', '\'', '“', '‘']) {
+                continue;
+            }
+        } else if let Some((between, after)) = list.split_once(':')
+            && between.split_whitespace().count() <= 3
+            && !between.contains([',', '`', '"'])
+        {
+            // "one of the following:" or "one of these values:"
+            list = after;
+        }
+        let list = if list.trim().is_empty() {
+            under()
+        } else {
+            list.to_owned()
+        };
+        let Some((allowed, quoted, or)) = alternatives(&list, cue == "one of") else {
+            continue;
+        };
+        // With no "one of", quoted values joined by "or" are a choice, where
+        // bare words may be a description, as "short, factual or blank" is.
+        if copula && !(quoted && or) {
+            continue;
+        }
+        return Some(Values {
+            field,
+            allowed,
+            quoted,
+        });
+    }
+    None
+}
+
+/// The field `lead` names last, before the words that say it holds what
+/// follows -- "`status` must be exactly", "status:" or "the status column
+/// is" -- or straight before what follows when `direct`, with what comes
+/// before the field.
+fn field_before(lead: &str, direct: bool) -> Option<(String, &str)> {
+    let mut rest = lead.trim_end();
+    if let Some(before) = rest.strip_suffix([':', '(']) {
+        rest = before;
+    } else if !direct {
+        while let Some(before) = without_last(rest, &QUALIFIERS) {
+            rest = before;
+        }
+        if let Some(before) = without_last(rest, &["is", "are", "as"]) {
+            rest = before;
+        } else {
+            rest = without_last(rest, &["be"])?;
+            while let Some(before) = without_last(rest, &QUALIFIERS) {
+                rest = before;
+            }
+            rest = without_last(rest, &MODALS)?;
+            rest = without_last(rest, &["has", "have", "needs", "need"]).unwrap_or(rest);
+        }
+    }
+    let (mut before, mut field) = last_name(rest)?;
+    if NOUNS.iter().any(|noun| field.eq_ignore_ascii_case(noun)) {
+        (before, field) = last_name(before)?;
+    }
+    Some((field.to_owned(), before))
+}
+
+/// The name `text` ends with -- in backticks or quotes, or a word, in bold
+/// or not -- and the text before it.
+fn last_name(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim_end().trim_end_matches('*');
+    let (before, name) = match text.chars().next_back()? {
+        quote @ ('`' | '"' | '\'') => {
+            let inner = &text[..text.len() - 1];
+            let open = inner.rfind(quote)?;
+            (&inner[..open], &inner[open + 1..])
+        }
+        _ => text.rsplit_once(char::is_whitespace).unwrap_or(("", text)),
+    };
+    let name = name.trim_start_matches(['*', '(']);
+    let plain = name
+        .chars()
+        .all(|c| c.is_alphanumeric() || "_-. ".contains(c));
+    (plain && name.chars().any(char::is_alphanumeric)).then_some((before, name))
+}
+
+/// `text` without its last word, when that word is one of `words`.
+fn without_last<'a>(text: &'a str, words: &[&str]) -> Option<&'a str> {
+    let text = text.trim_end();
+    let (before, last) = text.rsplit_once(char::is_whitespace).unwrap_or(("", text));
+    words
+        .iter()
+        .any(|word| last.eq_ignore_ascii_case(word))
+        .then_some(before)
+}
+
+/// `text` after `word` and the space after it, when it starts with them.
+fn word_after<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let rest = text.get(word.len()..)?;
+    (text[..word.len()].eq_ignore_ascii_case(word) && rest.starts_with(char::is_whitespace))
+        .then(|| rest.trim_start())
+}
+
+/// Whether `text`, said before a field or a list's items, makes what follows
+/// true of some only, as "If it is late," "Where it is late," or "For
+/// rejected rows," do; "For each row" and "an array where each item" do
+/// not.
+fn conditional(text: &str) -> bool {
+    let plain = plain(text);
+    let mut words = plain.split_whitespace();
+    let some = match words.next() {
+        Some("for") => words
+            .next()
+            .is_none_or(|next| !["each", "every", "all"].contains(&next)),
+        Some("where") => true,
+        _ => false,
+    };
+    some || says(text, &CONDITIONS)
+}
+
+/// The values `text` lists and nothing more, as "`a`, `b` or `c`", "a, b,
+/// c" or "{a | b}", with whether each was quoted and whether "or" joined
+/// them; None for anything else, or a value alone.
+fn alternatives(text: &str, and: bool) -> Option<(Vec<String>, bool, bool)> {
+    let mut rest = text.trim();
+    if let Some(inner) = rest.strip_prefix('{') {
+        rest = inner.split_once('}')?.0;
+    } else {
+        // A list ends with its sentence, a clause after it, or the
+        // parenthesis it is in.
+        rest = rest.split([';', ')']).next().unwrap_or_default();
+        for dash in [" -- ", " — ", " – ", " - "] {
+            rest = rest.split(dash).next().unwrap_or_default();
+        }
+        rest = rest.trim().trim_end_matches('.');
+    }
+    let (mut values, mut quoted, mut or) = (Vec::new(), true, false);
+    loop {
+        let (value, was_quoted, after) = value_at(rest)?;
+        values.push(value.to_owned());
+        quoted &= was_quoted;
+        let mut after = after.trim_start();
+        if after.is_empty() {
+            break;
+        }
+        let comma = after.starts_with([',', '|']);
+        if comma {
+            after = after[1..].trim_start();
+        }
+        if let Some(next) = word_after(after, "or") {
+            (after, or) = (next, true);
+        } else if let Some(next) = word_after(after, "and").filter(|_| and) {
+            after = next;
+        } else if !comma {
+            return None;
+        }
+        rest = after;
+    }
+    let open = values
+        .iter()
+        .any(|value| ["etc", "...", "…"].contains(&value.to_ascii_lowercase().as_str()));
+    (values.len() > 1 && !open).then_some((values, quoted, or))
+}
+
+/// The value `text` starts with -- in backticks or quotes, or a bare word --
+/// with whether it was quoted, and the text after it.
+fn value_at(text: &str) -> Option<(&str, bool, &str)> {
+    let text = text.trim_start();
+    let first = text.chars().next()?;
+    let close = match first {
+        '`' | '"' | '\'' => first,
+        '“' => '”',
+        '‘' => '’',
+        _ => {
+            let end = text
+                .find(|c: char| !(c.is_alphanumeric() || "_-.+/".contains(c)))
+                .unwrap_or(text.len());
+            return (end > 0).then(|| (&text[..end], false, &text[end..]));
+        }
+    };
+    let (value, after) = text[first.len_utf8()..].split_once(close)?;
+    (!value.trim().is_empty()).then_some((value, true, after))
+}
+
+/// The outputs `text` names, each once, in the order it names them.
+fn outputs_in(text: &str, outputs: &[Output], workspace: &Path) -> Vec<usize> {
+    let mut found = Vec::new();
+    for i in words(text).filter_map(|word| named(word, outputs, workspace)) {
+        if !found.contains(&i) {
+            found.push(i);
+        }
+    }
+    found
+}
+
+/// The output what `sentence` asks of a file is about: the one it names, or
+/// else the one its `line` names, or else `topic`, the one its section or
+/// item is about; None where it names several, or one other than `topic`,
+/// since it may name the file it takes something from.
+fn subject(
+    sentence: &str,
+    line: &str,
+    topic: Option<usize>,
+    outputs: &[Output],
+    workspace: &Path,
+) -> Option<usize> {
+    let mut named = outputs_in(sentence, outputs, workspace);
+    if named.is_empty() {
+        named = outputs_in(line, outputs, workspace);
+    }
+    match (named.as_slice(), topic) {
+        ([], topic) => topic,
+        (&[one], None) => Some(one),
+        (&[one], Some(topic)) => (one == topic).then_some(one),
+        _ => None,
+    }
+}
+
+/// The terms `sentence` asks a file to hold word for word: names in code
+/// form after the word asking for them, as in "Mention `rule_id` and
+/// CLAIM-1 … CLAIM-3", and words listed after "verbs" or "terms", as in
+/// "Use the verbs soften and remove"; none where it asks for nothing
+/// outright, or only in some cases.
+fn terms_in(sentence: &str) -> Vec<String> {
+    let Some(mut asked) = to_say(sentence).filter(|_| !says(sentence, &CONDITIONS)) else {
+        return Vec::new();
+    };
+    // A clause after a semicolon, as "; do not add other ids" is, or the
+    // examples a sentence gives say something else.
+    asked = asked.split(';').next().unwrap_or_default();
+    let lower = asked.to_ascii_lowercase();
+    let examples = EXAMPLES.iter().chain(&["such as"]);
+    if let Some(at) = examples.filter_map(|words| lower.find(words)).min() {
+        asked = &asked[..at];
+    }
+    // Each piece with whether it was in backticks, where a name counts only
+    // whole: `### Case <id>` is a heading to copy, not a term.
+    let mut pieces: Vec<(&str, bool)> = Vec::new();
+    for (n, part) in asked.split('`').enumerate() {
+        if n % 2 == 1 {
+            pieces.push((part, true));
+            continue;
+        }
+        let words = part
+            .split(|c: char| c.is_whitespace() || "()[],;:!?\"'*+".contains(c))
+            .map(|word| word.trim_end_matches('.'))
+            .filter(|word| !word.is_empty());
+        pieces.extend(words.map(|word| (word, false)));
+    }
+    let mut terms: Vec<String> = Vec::new();
+    let mut skip = 0;
+    for (i, &(piece, quoted)) in pieces.iter().enumerate() {
+        if i < skip {
+            continue;
+        }
+        let term = if quoted {
+            code_like(piece)
+        } else {
+            snake_case(piece) || identifier(piece)
+        };
+        // "every claim_id" or "each triggered rule_id" stands for many.
+        let each = pieces[i.saturating_sub(2)..i]
+            .iter()
+            .any(|(word, _)| EACH.contains(&word.to_lowercase().as_str()));
+        if !term || each {
+            continue;
+        }
+        let run = pieces.get(i + 1..i + 3).and_then(|after| match after {
+            [(to, false), (last, _)] if ["…", "...", "to", "through", "–", "—"].contains(to) => {
+                range(piece, last)
+            }
+            _ => None,
+        });
+        match run {
+            Some(names) => {
+                terms.extend(names);
+                skip = i + 3;
+            }
+            None => terms.push(piece.to_owned()),
+        }
+    }
+    // "Use the verbs soften, remove and qualify", or "verbs soften/remove".
+    let words = spans(asked);
+    let listing = words.iter().position(|(_, word)| {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+        WORDING.contains(&word.to_lowercase().as_str())
+    });
+    if let Some(at) = listing {
+        let (from, word) = words[at];
+        let list = asked[from + word.len()..].trim_start_matches([':', ' ']);
+        let list = list
+            .split('(')
+            .next()
+            .unwrap_or_default()
+            .replace('/', ", ");
+        if let Some((values, _, false)) = alternatives(&list, true)
+            && (values.iter())
+                .all(|value| value.len() > 1 && value.chars().all(char::is_alphabetic))
+        {
+            terms.extend(values);
+        }
+    }
+    let mut seen = HashSet::new();
+    terms.retain(|term| seen.insert(term.to_lowercase()));
+    terms
+}
+
+/// What `sentence` asks a file to say, after the word asking it, as in
+/// "Mention ...", "It must also cover: ..." or "Use the verbs ..."; None
+/// where it asks nothing of the kind, or asks that it not be said.
+fn to_say(sentence: &str) -> Option<&str> {
+    let words = spans(sentence);
+    let bare: Vec<String> = (words.iter())
+        .map(|(_, word)| {
+            let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+            word.to_lowercase()
+        })
+        .collect();
+    for (i, word) in bare.iter().enumerate() {
+        // "Include the words" or "use the remediation verbs", not "use the
+        // relative path".
+        let wording = || {
+            bare.get(i + 1)
+                .is_some_and(|next| ["the", "these"].contains(&next.as_str()))
+                && (bare.iter().skip(i + 2).take(2)).any(|word| WORDING.contains(&word.as_str()))
+        };
+        let asks = COVERING.contains(&word.as_str())
+            || (["include", "use"].contains(&word.as_str()) && wording());
+        if !asks {
+            continue;
+        }
+        // Outright, as the first word or after "must", and not as in "do
+        // not mention" or "payments that reference".
+        let mut start = i;
+        while start > 0 && ADVERBS.contains(&bare[start - 1].as_str()) {
+            start -= 1;
+        }
+        let first = (bare[..start].iter()).all(|word| word.chars().all(|c| c.is_ascii_digit()));
+        let modal = start > 0 && ["must", "should", "shall"].contains(&bare[start - 1].as_str());
+        if first || modal {
+            let (at, word) = words[i];
+            return Some(&sentence[at + word.len()..]);
+        }
+    }
+    None
+}
+
+/// The phrases line `at` of `lines` forbids a file to hold: those listed
+/// after "Do not include the phrases:" or "Do not call anyone a", under "Do
+/// not state:", or in quotes after "Do not say" under a heading such as
+/// "Forbidden:"; none for any other rule, as "Do not use the network" is.
+fn forbidden_at(lines: &[&str], at: usize) -> Vec<String> {
+    let line = lines[at];
+    let under = forbidding(lines, at);
+    let mut phrases = Vec::new();
+    for sentence in sentences(line) {
+        let words = spans(sentence);
+        let bare: Vec<String> = (words.iter())
+            .map(|(_, word)| {
+                let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+                word.to_lowercase()
+            })
+            .collect();
+        for (i, word) in bare.iter().enumerate() {
+            let negated = i > 0 && NOTS.contains(&bare[i - 1].as_str());
+            let (start, said) = words[i];
+            let rest = &sentence[start + said.len()..];
+            let list = if negated && ["call", "describe"].contains(&word.as_str()) {
+                let who = ["anyone", "anybody"]
+                    .iter()
+                    .find_map(|who| word_after(rest.trim_start(), who));
+                // "Call anyone a cheat" or "describe anyone as a cheat", and
+                // not "call anyone names".
+                who.and_then(|after| {
+                    let after = word_after(after, "as").unwrap_or(after);
+                    ["a", "an"].iter().find_map(|a| word_after(after, a))
+                })
+                .map(str::to_owned)
+            } else if SAYING.contains(&word.as_str()) && (negated || under) {
+                match rest.split_once(':') {
+                    // "Do not include these phrases as claims: a, b" or "Do
+                    // not state:" over a list, but not "Do not include:
+                    // emails, phone numbers", which lists what, not wording.
+                    Some((object, list))
+                        if !object.contains(['"', '“', '`', ';'])
+                            && object.split_whitespace().count() <= 6
+                            && (says(object, &PHRASING)
+                                || (object.trim().is_empty()
+                                    && STATING.contains(&word.as_str()))) =>
+                    {
+                        if list.trim().is_empty() && line.trim_end().ends_with(':') {
+                            Some(listed_under(lines, lines, at))
+                        } else {
+                            Some(list.to_owned())
+                        }
+                    }
+                    // `write "a" or "b"` under "Forbidden:".
+                    _ if under => quoted_after(rest),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(list) = list {
+                phrases.extend(phrases_in(&list));
+                break;
+            }
+        }
+    }
+    phrases
+}
+
+/// The phrases listed under line `at` of `lines` when it is a heading such
+/// as "Do not state:" or "Never use these words:", as a policy's judgments
+/// not to write are; none under "Agents must not state:", a rule for others
+/// that the task may be to check.
+fn stated_at(lines: &[&str], at: usize) -> Vec<String> {
+    let plain = plain(lines[at]);
+    let told = [" do not ", " don't ", " dont ", " never "]
+        .iter()
+        .find_map(|not| plain.strip_prefix(not))
+        .unwrap_or_default();
+    // "Do not state:" alone, since "Do not say anything about:" lists
+    // topics, not wording.
+    let (verb, object) = told.split_once(' ').unwrap_or_default();
+    let wording = SAYING.contains(&verb)
+        && (says(object, &PHRASING) || (object.is_empty() && STATING.contains(&verb)));
+    let first = (at + 1..lines.len()).find(|&i| !lines[i].trim().is_empty());
+    let heads = lines[at].trim_end().ends_with(':') && first.is_some_and(|i| listed(lines[i]));
+    if !wording || !heads {
+        return Vec::new();
+    }
+    phrases_in(&listed_under(lines, lines, at))
+}
+
+/// Whether line `at` of `lines` is an item under a heading such as
+/// "Forbidden:" or "Do not:", whose items need not say "not" themselves.
+fn forbidding(lines: &[&str], at: usize) -> bool {
+    if !listed(lines[at]) {
+        return false;
+    }
+    let heading = lines[..at]
+        .iter()
+        .rev()
+        .find(|line| !listed(line) && !line.trim().is_empty());
+    heading.is_some_and(|heading| {
+        let plain = plain(heading);
+        heading.trim_end().ends_with(':')
+            && (says(heading, &["forbidden", "prohibited"])
+                || [" do not ", " don't ", " never "].contains(&plain.as_str()))
+    })
+}
+
+/// The text after `rest`'s optional "the phrase" or "these words" when it
+/// opens with a quote, as `"a" or "b"` does.
+fn quoted_after(rest: &str) -> Option<String> {
+    let mut rest = rest.trim_start();
+    for lead in ["the", "these", "any", "phrases", "phrase", "words", "word"] {
+        rest = word_after(rest, lead).unwrap_or(rest);
+    }
+    rest.starts_with(['"', '“', '`']).then(|| rest.to_owned())
+}
+
+/// The phrases `list` gives: those in quotes where it quotes any, or else
+/// each between its commas and "or", as far as each is a few plain words.
+fn phrases_in(list: &str) -> Vec<String> {
+    let list = list.split(';').next().unwrap_or_default();
+    let list = list.trim().trim_end_matches('.');
+    let mut quoted = Vec::new();
+    let mut rest = list;
+    while let Some(open) = rest.find(['"', '“', '`']) {
+        let mark = rest[open..].chars().next().unwrap_or('"');
+        let close = if mark == '“' { '”' } else { mark };
+        let after = &rest[open + mark.len_utf8()..];
+        let Some(end) = after.find(close) else {
+            break;
+        };
+        quoted.push(&after[..end]);
+        rest = &after[end + close.len_utf8()..];
+    }
+    let items: Vec<&str> = if quoted.is_empty() {
+        (list.split(','))
+            .flat_map(|item| {
+                let item = item.trim();
+                let item = (item
+                    .strip_prefix("or ")
+                    .or_else(|| item.strip_prefix("and ")))
+                .unwrap_or(item);
+                item.split(" or ")
+            })
+            .collect()
+    } else {
+        quoted
+    };
+    items
+        .into_iter()
+        .map(|item| item.trim_matches(|c: char| c.is_whitespace() || "*`\"“”".contains(c)))
+        .filter(|item| {
+            let count = item.split_whitespace().count();
+            (1..=5).contains(&count)
+                && item.chars().count() > 2
+                && (item.chars()).all(|c| c.is_alphanumeric() || " -'/&.".contains(c))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The words of `text` split at white space, each with where it starts.
+fn spans(text: &str) -> Vec<(usize, &str)> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    for word in text.split_whitespace() {
+        let at = from + text[from..].find(word).unwrap_or_default();
+        spans.push((at, word));
+        from = at + word.len();
+    }
+    spans
+}
+
+/// Whether `text`, in backticks, is one name to write as it is, as
+/// `fda_clearance_present` or `u4` are, rather than a file, a placeholder
+/// or a phrase.
+fn code_like(text: &str) -> bool {
+    text.chars().any(char::is_alphabetic)
+        && (text.chars()).all(|c| c.is_alphanumeric() || "_-.:#@".contains(c))
+        && !KINDS.contains(&kind(text).as_str())
+}
+
+/// Whether `word` is a name in snake case, as `evidence_manifest` is.
+fn snake_case(word: &str) -> bool {
+    word.starts_with(|c: char| c.is_ascii_lowercase())
+        && word.contains('_')
+        && (word.split('_')).all(|part| {
+            !part.is_empty() && (part.chars()).all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
+/// Whether `word` is an identifier in capitals, as CLAIM-1 or PLAN-A are.
+fn identifier(word: &str) -> bool {
+    let mut parts = word.split('-');
+    let head = parts.next().unwrap_or_default();
+    let rest: Vec<&str> = parts.collect();
+    head.len() > 1
+        && head.chars().all(|c| c.is_ascii_uppercase())
+        && !rest.is_empty()
+        && (rest.iter()).all(|part| {
+            !part.is_empty() && (part.chars()).all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        })
+}
+
+/// Whether `value` reads as an id: letters and digits joined by `-` or
+/// `_`, with a digit or a dash, as `BLK-01` and `item_3` do and a word, a
+/// name in snake case or a path does not.
+fn id_like(value: &str) -> bool {
+    let parts = || value.split(['-', '_']);
+    parts().nth(1).is_some()
+        && parts().all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()))
+        && value.chars().any(|c| c.is_ascii_alphabetic())
+        && (value.contains('-') || value.chars().any(|c| c.is_ascii_digit()))
+}
+
+/// Whether `key` is named for ids, as `blocker_ids` and `claim_id` are.
+fn id_named(key: &str) -> bool {
+    ["id", "ids"].contains(&last_word(key).as_str())
+}
+
+/// The names from `first` to `last`, as CLAIM-1 to CLAIM-7 run, when both
+/// are one identifier numbered and the run is short.
+fn range(first: &str, last: &str) -> Option<Vec<String>> {
+    let (head, from) = first.rsplit_once('-')?;
+    let (other, to) = last.rsplit_once('-')?;
+    let (from, to) = (from.parse::<u32>().ok()?, to.parse::<u32>().ok()?);
+    (identifier(first) && head == other && from < to && to - from <= SPAN)
+        .then(|| (from..=to).map(|n| format!("{head}-{n}")).collect())
+}
+
+/// The stamp of `file` as it is now, or None when it is no file.
+fn stamp(file: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(file).ok()?;
+    meta.is_file().then(|| (meta.len(), meta.modified().ok()))
+}
+
+/// What is wrong with `output`, found at `file`.
+fn wrong(output: &Output, file: &Path) -> Vec<String> {
+    let name = &output.path;
+    let size = match std::fs::metadata(file) {
+        Ok(meta) if meta.is_file() => meta.len(),
+        Ok(_) => return vec![format!("`{name}` is a folder, not a file.")],
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return vec![format!("`{name}` does not exist.")];
+        }
+        Err(e) => return vec![format!("`{name}` could not be read: {e}.")],
+    };
+    if size > LARGEST {
+        return Vec::new();
+    }
+    let bytes = match std::fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(e) => return vec![format!("`{name}` could not be read: {e}.")],
+    };
+    // A list in plain text or JSON Lines may rightly hold nothing.
+    let may_be_empty = matches!(kind(name).as_str(), "txt" | "jsonl");
+    if !may_be_empty && bytes.iter().all(u8::is_ascii_whitespace) {
+        return vec![format!("`{name}` is empty.")];
+    }
+    let mut problems = match kind(name).as_str() {
+        "json" | "jsonl" | "csv" => text(output, &bytes),
+        "docx" => office(name, &bytes, "Word document", "word/document.xml"),
+        "xlsx" => office(name, &bytes, "Excel workbook", "xl/workbook.xml"),
+        "pptx" => office(name, &bytes, "PowerPoint file", "ppt/presentation.xml"),
+        "png" if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") => {
+            vec![format!("`{name}` is not a PNG image.")]
+        }
+        _ => Vec::new(),
+    };
+    problems.extend(unsaid(output, &bytes));
+    problems.extend(repeated(output, &bytes));
+    problems
+}
+
+/// The wording `output`, holding `bytes`, repeats of what its request
+/// forbids, with the line each is first on.
+fn repeated(output: &Output, bytes: &[u8]) -> Option<String> {
+    if output.forbidden.is_empty() || !READABLE.contains(&kind(&output.path).as_str()) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(bytes).to_lowercase();
+    let mut found: Vec<(usize, &String)> = Vec::new();
+    for (at, line) in text.lines().enumerate() {
+        for phrase in &output.forbidden {
+            let first = !found.iter().any(|(_, seen)| *seen == phrase);
+            if first && holds_word(line, &phrase.to_lowercase()) {
+                found.push((at + 1, phrase));
+            }
+        }
+    }
+    let shown: Vec<String> = (found.iter().take(LINES))
+        .map(|(line, phrase)| format!("`{phrase}` (line {line})"))
+        .collect();
+    let more = match found.len().saturating_sub(LINES) {
+        0 => String::new(),
+        more => format!(" and {more} more"),
+    };
+    (!found.is_empty()).then(|| {
+        format!(
+            "`{}` repeats wording the task forbids: {}{more}; leave it out even to say it was avoided, and name it by its kind.",
+            output.path,
+            shown.join(", ")
+        )
+    })
+}
+
+/// What `output`, holding `bytes`, lacks of the terms its request names for
+/// it, each looked for as a word of its own in any case.
+fn unsaid(output: &Output, bytes: &[u8]) -> Option<String> {
+    if output.terms.is_empty() || !READABLE.contains(&kind(&output.path).as_str()) {
+        return None;
+    }
+    // Markdown may escape an underscore, which no reader sees.
+    let text = String::from_utf8_lossy(bytes)
+        .to_lowercase()
+        .replace("\\_", "_");
+    let lacking: Vec<String> = (output.terms.iter())
+        .filter(|term| !holds_term(&text, &term.to_lowercase()))
+        .map(|term| format!("`{term}`"))
+        .collect();
+    (!lacking.is_empty()).then(|| {
+        format!(
+            "`{}` lacks terms the request names for it: {}; write each as the request does.",
+            output.path,
+            lacking.join(", ")
+        )
+    })
+}
+
+/// Whether `term` is in `text`: a plain word in any form of it, as
+/// "softened" covers "soften"; a code-like id, with a digit, `_` or `-`,
+/// only written whole.
+fn holds_term(text: &str, term: &str) -> bool {
+    if !term.chars().all(|c| c.is_alphabetic() || c == ' ') {
+        return holds_word(text, term);
+    }
+    let part = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    text.match_indices(term)
+        .any(|(at, _)| !part(text[..at].chars().next_back()))
+}
+
+/// Whether `word` stands in `text` with no letter, digit or underscore on
+/// either side, as a name or a word written whole does.
+fn holds_word(text: &str, word: &str) -> bool {
+    let part = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    text.match_indices(word).any(|(at, _)| {
+        !part(text[..at].chars().next_back()) && !part(text[at + word.len()..].chars().next())
+    })
+}
+
+/// What is wrong with JSON, JSON Lines or CSV `output` holding `bytes`.
+fn text(output: &Output, bytes: &[u8]) -> Vec<String> {
+    let name = &output.path;
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return vec![format!("`{name}` is not UTF-8 text.")];
+    };
+    let mut problems = Vec::new();
+    // Python reads plain UTF-8 unless told otherwise, and then the mark is a
+    // character: json.loads refuses it, and csv puts it in the first name.
+    let text = match text.strip_prefix('\u{FEFF}') {
+        Some(rest) => {
+            problems.push(format!(
+                "`{name}` starts with a byte order mark, which readers take as part of its text; save it without one."
+            ));
+            rest
+        }
+        None => text,
+    };
+    match kind(name).as_str() {
+        "json" => problems.extend(json(output, text)),
+        "jsonl" => problems.extend(json_lines(output, text)),
+        _ => problems.extend(csv(output, text)),
+    }
+    problems
+}
+
+/// What is wrong with JSON `output` holding `text`.
+fn json(output: &Output, text: &str) -> Vec<String> {
+    let name = &output.path;
+    if text.trim_start().starts_with("```") {
+        return vec![format!(
+            "`{name}` is wrapped in a ``` fence; it must hold the JSON alone."
+        )];
+    }
+    let value = match parsed(text) {
+        Ok(value) => value,
+        Err(e) => return vec![format!("`{name}` is not valid JSON: {e}.")],
+    };
+    held(output, &[(None, value)])
+}
+
+/// What is wrong with what JSON `output` holds -- its one value, or each
+/// line's in JSON Lines, with the line it is on -- against the keys and
+/// values its request names.
+fn held(output: &Output, values: &[(Option<usize>, Value)]) -> Vec<String> {
+    let name = &output.path;
+    let nothing = output.keys.is_empty() && output.each.is_empty() && output.values.is_empty();
+    let sourced = !output.sources.files.is_empty();
+    if nothing && output.codes.is_empty() && output.empty.is_empty() && !sourced {
+        return Vec::new();
+    }
+    // A JSON Lines file is one list, each line an item of it.
+    let lines = kind(name) == "jsonl";
+    let mut found = HashSet::new();
+    let mut lists: BTreeMap<String, Vec<&Map<String, Value>>> = BTreeMap::new();
+    // The values each listed field has, gathered by where each is.
+    let mut places: Vec<Places> = output.values.iter().map(|_| BTreeMap::new()).collect();
+    // The text each key named for codes holds, alone or in a list, by key.
+    let mut coded: BTreeMap<String, Vec<(Option<usize>, &str)>> = BTreeMap::new();
+    // The text each key naming a source holds, alone or in a list, by key.
+    let mut named: BTreeMap<String, Vec<(Option<usize>, &str)>> = BTreeMap::new();
+    // Each record holding a field for ids the request names, by the field.
+    let mut ided: BTreeMap<String, Vec<Cited>> = BTreeMap::new();
+    // What each field to leave empty in some records holds in them, with
+    // the line or id of each.
+    let mut filled: Vec<Vec<(String, Option<String>)>> =
+        output.empty.iter().map(|_| Vec::new()).collect();
+    let asks_keys = !output.keys.is_empty() || !output.each.is_empty();
+    for (line, value) in values {
+        let mut at = String::from(if lines { "[]" } else { "" });
+        walk(value, &mut at, lines, &mut |at, inner, item| {
+            let Value::Object(object) = inner else {
+                return;
+            };
+            if asks_keys {
+                found.extend(object.keys().map(String::as_str));
+            }
+            if item && !output.each.is_empty() {
+                gather(&mut lists, at, object);
+            }
+            for (listed, place) in output.values.iter().zip(&mut places) {
+                if let Some(text) = object.get(listed.field.as_str()).and_then(scalar) {
+                    gather(place, at, (*line, text));
+                }
+            }
+            for (empty, found) in output.empty.iter().zip(&mut filled) {
+                let Some(value) = object.get(&empty.field).filter(|value| !blank(value)) else {
+                    continue;
+                };
+                if marked(object, empty) {
+                    let text = scalar(value).map_or_else(|| value.to_string(), Cow::into_owned);
+                    let place = (*line).map(|line| format!("line {line}"));
+                    found.push((text, place.or_else(|| record_id(object, &empty.field))));
+                }
+            }
+            for (key, inner) in object {
+                if !sourced || !NAMING.contains(&last_word(key).as_str()) {
+                    continue;
+                }
+                let texts = match inner {
+                    Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                    inner => inner.as_str().into_iter().collect::<Vec<_>>(),
+                };
+                for text in texts {
+                    gather(&mut named, key, (*line, text));
+                }
+            }
+            for (key, inner) in object {
+                let Some(value) = inner.as_str().filter(|_| output.ids.fields.contains(key)) else {
+                    continue;
+                };
+                let mut others = Vec::new();
+                for (other, inner) in object.iter().filter(|(other, _)| *other != key) {
+                    let mut texts = Vec::new();
+                    strings(inner, &mut texts);
+                    others.extend(texts.into_iter().map(|text| (other.as_str(), text)));
+                }
+                gather(&mut ided, key, (*line, value, others));
+            }
+            if output.codes.is_empty() {
+                return;
+            }
+            for (key, inner) in object {
+                if !CODED.contains(&last_word(key).as_str()) {
+                    continue;
+                }
+                let texts = match inner {
+                    Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                    inner => inner.as_str().into_iter().collect::<Vec<_>>(),
+                };
+                for text in texts {
+                    gather(&mut coded, key, (*line, text));
+                }
+            }
+        });
+    }
+    let mut problems = Vec::new();
+    // Codes from an input's column of the same name, or for a list of flags
+    // or codes, the names a markdown input gives.
+    for (key, texts) in &coded {
+        let flags = FLAGS.contains(&last_word(key).as_str());
+        let applies = |codes: &&Codes| codes.column.as_ref().map_or(flags, |column| column == key);
+        let mut sets = output.codes.iter().filter(applies);
+        problems.extend(sets.find_map(|codes| with_notes(name, key, codes, texts.iter().copied())));
+    }
+    for (key, texts) in &named {
+        problems.extend(misnamed(name, key, &output.sources, texts.iter().copied()));
+    }
+    for (key, records) in &ided {
+        problems.extend(made_up(name, key, output, records));
+    }
+    for (empty, found) in output.empty.iter().zip(&filled) {
+        problems.extend(left_filled(name, empty, found));
+    }
+    // Anywhere in it, since the request may mean each item of a list or an
+    // object inside: a key missing everywhere is wrong whichever it meant,
+    // and so is one it names for each item of a list.
+    let mut missing: Vec<String> = Vec::new();
+    for key in output.keys.iter().chain(output.each.iter().flatten()) {
+        let named = format!("`{key}`");
+        if !found.contains(key.as_str()) && !missing.contains(&named) {
+            missing.push(named);
+        }
+    }
+    if !missing.is_empty() {
+        problems.push(format!(
+            "`{name}` lacks keys the request names: {}.",
+            missing.join(", ")
+        ));
+    }
+    for keys in &output.each {
+        let somewhere: Vec<&str> = (keys.iter())
+            .map(String::as_str)
+            .filter(|key| found.contains(key))
+            .collect();
+        problems.extend(each_item(name, &somewhere, &lists, lines));
+    }
+    for (listed, place) in output.values.iter().zip(places) {
+        problems.extend(unlisted(name, listed, place.into_values()));
+    }
+    problems
+}
+
+/// Adds `item` to the group `groups` keeps for `at`, keyed by a copy of it
+/// only the first time.
+fn gather<T>(groups: &mut BTreeMap<String, Vec<T>>, at: &str, item: T) {
+    match groups.get_mut(at) {
+        Some(group) => group.push(item),
+        None => {
+            groups.insert(at.to_owned(), vec![item]);
+        }
+    }
+}
+
+/// Calls `visit` with each value in `value`, where it is, as
+/// `orders[].lines[]` for the items of every order's `lines`, and
+/// whether it is an item of a list, as `value` is when `item`.
+fn walk<'a>(
+    value: &'a Value,
+    at: &mut String,
+    item: bool,
+    visit: &mut impl FnMut(&str, &'a Value, bool),
+) {
+    visit(at, value, item);
+    // One string grown and cut back as it goes in and out, since a large file
+    // holds a great many places.
+    let end = at.len();
+    match value {
+        Value::Object(map) => {
+            // An object of objects alone, as one keyed by name is, holds
+            // them as a list holds its items, all in one place.
+            let keyed = map.len() > 1 && map.values().all(Value::is_object);
+            for (key, inner) in map {
+                if end > 0 {
+                    at.push('.');
+                }
+                at.push_str(if keyed { "*" } else { key });
+                walk(inner, at, keyed, visit);
+                at.truncate(end);
+            }
+        }
+        Value::Array(items) => {
+            at.push_str("[]");
+            for inner in items {
+                walk(inner, at, true, visit);
+            }
+            at.truncate(end);
+        }
+        _ => {}
+    }
+}
+
+/// What is wrong with the items of `lists`, gathered by where each list is,
+/// against `keys` the request says each item holds: nothing when one list
+/// holding any of them has them all in every item, else what the list
+/// holding most of them lacks.
+fn each_item(
+    name: &str,
+    keys: &[&str],
+    lists: &BTreeMap<String, Vec<&Map<String, Value>>>,
+    lines: bool,
+) -> Option<String> {
+    let present = |list: &[&Map<String, Value>]| {
+        (keys.iter())
+            .filter(|key| list.iter().any(|item| item.contains_key(**key)))
+            .count()
+    };
+    // A list holding none of them is about something else, as is every list
+    // when the keys sit in one object of its own.
+    let mut candidates = lists
+        .iter()
+        .filter(|(_, list)| present(list) > 0)
+        .peekable();
+    candidates.peek()?;
+    let full = |list: &[&Map<String, Value>]| {
+        (list.iter()).all(|item| keys.iter().all(|key| item.contains_key(*key)))
+    };
+    if lists.values().any(|list| full(list)) {
+        return None;
+    }
+    // The list it most likely means: the one holding most of its keys, then
+    // the longest.
+    let (at, list) = candidates.max_by_key(|(_, list)| (present(list), list.len()))?;
+    let lacking: Vec<String> = keys
+        .iter()
+        .filter_map(|key| {
+            let count = list.iter().filter(|item| !item.contains_key(*key)).count();
+            (count > 0).then(|| format!("`{key}` (missing from {count})"))
+        })
+        .collect();
+    let count = list.len();
+    let (whole, of) = match at.strip_suffix("[]") {
+        Some(whole) => (whole, "items"),
+        None => (at.trim_end_matches(['*', '.']), "entries"),
+    };
+    let place = match whole {
+        "" if lines => format!("its {count} lines"),
+        "" => format!("its {count} {of}"),
+        whole => format!("the {count} {of} of `{whole}`"),
+    };
+    Some(format!(
+        "`{name}` lacks keys the request names for each item, in {place}: {}.",
+        lacking.join(", ")
+    ))
+}
+
+/// `value` as the word a request would list it by, or None for what no
+/// list of words names: null, a list or an object.
+fn scalar(value: &Value) -> Option<Cow<'_, str>> {
+    match value {
+        Value::String(text) => Some(Cow::Borrowed(text)),
+        Value::Number(number) => Some(Cow::Owned(number.to_string())),
+        Value::Bool(flag) => Some(Cow::Owned(flag.to_string())),
+        _ => None,
+    }
+}
+
+/// What is wrong with the values `listed.field` has in `name`, gathered by
+/// where each is, with its line where known: those the request does not
+/// list, unless one place holds listed ones alone, as the request may mean
+/// that place.
+fn unlisted(
+    name: &str,
+    listed: &Values,
+    places: impl IntoIterator<Item = Vec<(Option<usize>, impl AsRef<str>)>>,
+) -> Option<String> {
+    let mut wrong = Vec::new();
+    for place in places {
+        // An empty cell or string is a value left out, which a list of words
+        // does not forbid.
+        let filled: Vec<_> = place
+            .into_iter()
+            .filter(|(_, value)| !value.as_ref().trim().is_empty())
+            .collect();
+        if filled.is_empty() {
+            continue;
+        }
+        let before = wrong.len();
+        let unlisted = filled
+            .into_iter()
+            .filter(|(_, value)| !allows(listed, value.as_ref()));
+        wrong.extend(unlisted);
+        if wrong.len() == before {
+            return None;
+        }
+    }
+    let mut seen = HashSet::new();
+    let shown: Vec<String> = wrong
+        .iter()
+        .filter(|(_, value)| seen.insert(value.as_ref()))
+        .map(|(line, value)| {
+            let mut value = value
+                .as_ref()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if value.chars().count() > SHOWN {
+                value = value.chars().take(SHOWN).collect::<String>() + "...";
+            }
+            match line {
+                Some(line) => format!("`{value}` (line {line})"),
+                None => format!("`{value}`"),
+            }
+        })
+        .collect();
+    let more = match shown.len().saturating_sub(LINES) {
+        0 => String::new(),
+        more => format!(" and {more} more"),
+    };
+    let allowed: Vec<String> = listed
+        .allowed
+        .iter()
+        .map(|value| format!("`{value}`"))
+        .collect();
+    (!shown.is_empty()).then(|| {
+        format!(
+            "`{name}` has `{}` values the request does not list: {}{more}; it lists {}.",
+            listed.field,
+            shown[..shown.len().min(LINES)].join(", "),
+            allowed.join(", ")
+        )
+    })
+}
+
+/// Whether `listed` holds `value`: as written where it was quoted, in any
+/// case where it was a bare word, and as any number equal to it.
+fn allows(listed: &Values, value: &str) -> bool {
+    listed.allowed.iter().any(|allowed| {
+        allowed == value
+            || (!listed.quoted && allowed.eq_ignore_ascii_case(value))
+            || allowed
+                .parse::<f64>()
+                .is_ok_and(|number| value.parse::<f64>() == Ok(number))
+    })
+}
+
+/// `text` as JSON, with the bare NaN, Infinity and -Infinity that Python's
+/// json writes and reads back taken as numbers, or where it goes wrong.
+fn parsed(text: &str) -> Result<Value, serde_json::Error> {
+    // Retried only when it fails, so a file of plain JSON is read once, and
+    // the retry's error is the one given, since it is past any such token.
+    serde_json::from_str(text).or_else(|_| serde_json::from_str(&zeroed(text)))
+}
+
+/// `text` with each NaN, Infinity and -Infinity outside a string as a 0
+/// padded to its width, so an error after it keeps its column.
+fn zeroed(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut quoted, mut escaped) = (false, false);
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let bare = ["NaN", "Infinity", "-Infinity"]
+            .into_iter()
+            .find(|token| !quoted && rest.starts_with(token));
+        if let Some(token) = bare {
+            out.push_str(&format!("{:<1$}", 0, token.len()));
+            rest = &rest[token.len()..];
+            continue;
+        }
+        if escaped {
+            escaped = false;
+        } else if quoted && c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            quoted = !quoted;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// What is wrong with JSON Lines `output` holding `text`: its first lines
+/// that do not parse or, when all do, what they hold.
+fn json_lines(output: &Output, text: &str) -> Vec<String> {
+    let name = &output.path;
+    let (mut values, mut problems) = (Vec::new(), Vec::new());
+    for (at, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match parsed(line) {
+            Ok(value) => values.push((Some(at + 1), value)),
+            Err(e) => problems.push(format!("`{name}` line {} is not valid JSON: {e}.", at + 1)),
+        }
+        if problems.len() == LINES {
+            break;
+        }
+    }
+    // A line that will not parse may hold any key, so what the lines hold is
+    // looked at once they all do.
+    if !problems.is_empty() {
+        return problems;
+    }
+    held(output, &values)
+}
+
+/// What is wrong with CSV `output` holding `text`: a header other than the
+/// one asked for, columns missing or out of the order asked for, rows with
+/// more or fewer fields than the header, and values the request does not
+/// list.
+fn csv(output: &Output, text: &str) -> Vec<String> {
+    let name = &output.path;
+    let records = match records(text) {
+        Ok(records) => records,
+        Err(line) => {
+            return vec![format!(
+                "`{name}` has a quote opened on line {line} that is never closed."
+            )];
+        }
+    };
+    let Some((head, rows)) = records.split_first() else {
+        return Vec::new();
+    };
+    let mut problems = Vec::new();
+    if let Some(header) = &output.header
+        && head.fields.iter().map(String::as_str).ne(header.split(','))
+    {
+        problems.push(format!(
+            "`{name}` has the header `{}` where the request gives `{header}`.",
+            head.fields.join(",")
+        ));
+    }
+    if output.header.is_none() {
+        problems.extend(columns(output, &head.fields));
+    }
+    let width = head.fields.len();
+    let uneven = rows.iter().filter(|row| row.fields.len() != width);
+    problems.extend(uneven.take(LINES).map(|row| {
+        let count = row.fields.len();
+        let hint = if count > width {
+            "; a field holding a comma must be in double quotes"
+        } else {
+            ""
+        };
+        format!(
+            "`{name}` line {} has {count} fields where the header has {width}{hint}.",
+            row.line
+        )
+    }));
+    for listed in &output.values {
+        let Some(at) = head.fields.iter().position(|field| *field == listed.field) else {
+            continue;
+        };
+        let cells = rows
+            .iter()
+            .filter_map(|row| Some((Some(row.line), row.fields.get(at)?.as_str())));
+        problems.extend(unlisted(name, listed, [cells.collect()]));
+    }
+    // A column named as an input's column of codes holds them as it does.
+    for (at, field) in head.fields.iter().enumerate() {
+        let cells =
+            || (rows.iter()).filter_map(|row| Some((Some(row.line), row.fields.get(at)?.as_str())));
+        let mut sets = (output.codes.iter()).filter(|codes| codes.column.as_ref() == Some(field));
+        problems.extend(sets.find_map(|codes| with_notes(name, field, codes, cells())));
+    }
+    // A column naming a source holds inputs' paths alone, as they write them.
+    for (at, field) in head.fields.iter().enumerate() {
+        if output.sources.files.is_empty() || !NAMING.contains(&last_word(field).as_str()) {
+            continue;
+        }
+        let cells = rows
+            .iter()
+            .filter_map(|row| Some((Some(row.line), row.fields.get(at)?.as_str())));
+        problems.extend(misnamed(name, field, &output.sources, cells));
+    }
+    // A column for ids the request names holds the ids the inputs give.
+    for (at, field) in head.fields.iter().enumerate() {
+        if !output.ids.fields.contains(field) {
+            continue;
+        }
+        let records: Vec<Cited> = (rows.iter())
+            .filter_map(|row| {
+                let value = row.fields.get(at).filter(|cell| !cell.trim().is_empty())?;
+                let others = (head.fields.iter().zip(&row.fields).enumerate())
+                    .filter(|(n, _)| *n != at)
+                    .map(|(_, (column, cell))| (column.as_str(), cell.as_str()))
+                    .collect();
+                Some((Some(row.line), value.as_str(), others))
+            })
+            .collect();
+        problems.extend(made_up(name, field, output, &records));
+    }
+    for empty in &output.empty {
+        let Some(at) = head.fields.iter().position(|field| *field == empty.field) else {
+            continue;
+        };
+        let flag = head.fields.iter().position(|field| *field == empty.code);
+        let marked_row = |row: &Record| {
+            let cells = row.fields.iter().enumerate().filter(|(n, _)| *n != at);
+            (cells.map(|(_, cell)| cell.trim())).any(|cell| cell.eq_ignore_ascii_case(&empty.code))
+                || (flag.and_then(|n| row.fields.get(n)))
+                    .is_some_and(|cell| cell.trim().eq_ignore_ascii_case("true"))
+        };
+        let found: Vec<(String, Option<String>)> = rows
+            .iter()
+            .filter(|row| marked_row(row))
+            .filter_map(|row| {
+                let cell = row.fields.get(at).filter(|cell| !cell.trim().is_empty())?;
+                Some((cell.clone(), Some(format!("line {}", row.line))))
+            })
+            .collect();
+        problems.extend(left_filled(name, empty, &found));
+    }
+    problems
+}
+
+/// Whether JSON `object` is a record `empty.code` marks: another of its
+/// fields holds that code, or one named as the code is true.
+fn marked(object: &Map<String, Value>, empty: &Empty) -> bool {
+    object.iter().any(|(key, value)| {
+        let holds = value
+            .as_str()
+            .is_some_and(|text| text.trim().eq_ignore_ascii_case(&empty.code));
+        *key != empty.field && (holds || (*key == empty.code && *value == Value::Bool(true)))
+    })
+}
+
+/// Whether `value` holds nothing: null, or an empty string, list or object.
+fn blank(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
+}
+
+/// The id of the record `object` is, as "case_id `C-8`", from a key that is
+/// id or ends in it, other than `field`, so a notice can say which it is.
+fn record_id(object: &Map<String, Value>, field: &str) -> Option<String> {
+    object.iter().find_map(|(key, value)| {
+        let id = key != field && (key == "id" || key.ends_with("_id"));
+        let value = scalar(value).filter(|_| id)?;
+        Some(format!("{key} `{value}`"))
+    })
+}
+
+/// What `name` holds in `empty.field` of the records the request says to
+/// leave it empty in, as `found` gives each with its line or id.
+fn left_filled(name: &str, empty: &Empty, found: &[(String, Option<String>)]) -> Option<String> {
+    if found.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = (found.iter().take(LINES))
+        .map(|(value, place)| {
+            let mut value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            if value.chars().count() > SHOWN {
+                value = value.chars().take(SHOWN).collect::<String>() + "...";
+            }
+            match place {
+                Some(place) => format!("`{value}` ({place})"),
+                None => format!("`{value}`"),
+            }
+        })
+        .collect();
+    let more = match found.len().saturating_sub(LINES) {
+        0 => String::new(),
+        more => format!(" and {more} more"),
+    };
+    Some(format!(
+        "`{name}` fills `{}` in records marked `{}`: {}{more}; the request says {}, so leave it empty there.",
+        empty.field,
+        empty.code,
+        shown.join(", "),
+        empty.said
+    ))
+}
+
+/// The last word of `key`, in lower case, as `flags` is of
+/// `manual_review_flags`.
+fn last_word(key: &str) -> String {
+    key.rsplit(['_', '-', '.', ' '])
+        .next()
+        .unwrap_or(key)
+        .to_lowercase()
+}
+
+/// What `field` of `name` holds among `cells`, each with its line where
+/// known, that adds words of its own to `codes`, which an input holds bare.
+fn with_notes<'a>(
+    name: &str,
+    field: &str,
+    codes: &Codes,
+    cells: impl IntoIterator<Item = (Option<usize>, &'a str)>,
+) -> Option<String> {
+    let (mut seen, mut shown) = (HashSet::new(), Vec::new());
+    // The code the first starts from, to show how the input writes it.
+    let mut code = None;
+    for (line, value) in cells {
+        if !noted(value, &codes.codes) {
+            continue;
+        }
+        code = code.or_else(|| (codes.codes.iter()).find(|code| holds_word(value, code)));
+        let mut value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        if value.chars().count() > SHOWN {
+            value = value.chars().take(SHOWN).collect::<String>() + "...";
+        }
+        // Values alike as far as shown would read as one given twice.
+        if !seen.insert(value.clone()) {
+            continue;
+        }
+        shown.push(match line {
+            Some(line) => format!("`{value}` (line {line})"),
+            None => format!("`{value}`"),
+        });
+    }
+    let code = code?;
+    let more = match shown.len().saturating_sub(LINES) {
+        0 => String::new(),
+        more => format!(" and {more} more"),
+    };
+    let held = match &codes.column {
+        Some(column) => format!("holds codes such as `{code}` bare in its `{column}` column"),
+        None => format!("gives codes such as `{code}` bare"),
+    };
+    Some(format!(
+        "`{name}` has `{field}` values that add a note to a code: {}{more}; `{}` {held}, so write the codes alone and move any note to a free-text field.",
+        shown[..shown.len().min(LINES)].join(", "),
+        codes.input
+    ))
+}
+
+/// Whether `value` holds one of `codes` and words of its own, as "CLAIM-1
+/// (escalation noted)" or "manual_review_needed: see the log" do; not codes
+/// alone, as "CLAIM-1; CLAIM-4" or "CLAIM-1 and INTERNAL-1" are, nor a value
+/// holding none of them.
+fn noted(value: &str, codes: &[String]) -> bool {
+    let value = value.trim();
+    if codes.iter().any(|code| code == value) {
+        return false;
+    }
+    let tokens: Vec<&str> = value
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+        .filter(|token| !token.is_empty())
+        .collect();
+    if !tokens
+        .iter()
+        .any(|token| codes.iter().any(|code| code == token))
+    {
+        return false;
+    }
+    // A name in code form beside them is another code, not a note.
+    tokens.iter().any(|token| {
+        let letters = token.chars().filter(|c| c.is_alphabetic()).count();
+        token.starts_with(char::is_alphabetic)
+            && letters > 1
+            && !snake_case(token)
+            && !identifier(token)
+            && !["and", "or"].contains(&token.to_lowercase().as_str())
+    })
+}
+
+/// What `field` of `name` holds among `cells`, each with its line where
+/// known, that adds text to an input's path or writes the path otherwise
+/// than the inputs do, as `known` has them.
+fn misnamed<'a>(
+    name: &str,
+    field: &str,
+    known: &Sources,
+    cells: impl IntoIterator<Item = (Option<usize>, &'a str)>,
+) -> Vec<String> {
+    let (mut noted, mut other) = (Vec::new(), Vec::new());
+    // The first path given text, as the inputs write it where they do, and
+    // how an input writes the first path written otherwise.
+    let (mut alone, mut form) = (None, None);
+    for (line, value) in cells {
+        let (paths, text) = paths_in(value, &known.files);
+        let Some((first, file)) = paths.first() else {
+            continue;
+        };
+        if text {
+            if alone.is_none() {
+                let written = known.written.get(file).and_then(|forms| forms.first());
+                alone = Some(written.map_or(*first, |(form, _)| form.as_str()));
+            }
+            noted.push((line, value));
+            continue;
+        }
+        for (path, file) in &paths {
+            let Some(forms) = known.written.get(file) else {
+                continue;
+            };
+            // The file's own path in the workspace, `in/` and all, is never
+            // wrong, whatever shorter form an input uses for it.
+            if *path != file.as_str() && !forms.iter().any(|(written, _)| written == path) {
+                form = form.or_else(|| forms.first());
+                other.push((line, *path));
+            }
+        }
+    }
+    let mut problems = Vec::new();
+    if let Some(alone) = alone {
+        problems.push(format!(
+            "`{name}` has `{field}` values that add text to an input's path: {}; write the path alone, as `{alone}`, or as `{alone}#part` for a part of it, and move the rest to a free-text field.",
+            sample(&noted)
+        ));
+    }
+    if let Some((form, input)) = form {
+        problems.push(format!(
+            "`{name}` has `{field}` paths the inputs write otherwise: {}; `{input}` writes `{form}`, so write each path as the inputs do.",
+            sample(&other)
+        ));
+    }
+    problems
+}
+
+/// The inputs `value` names by their paths, each as written with the file
+/// it is, and whether it holds text besides them, a part of one after a `#`
+/// or `:`, and the names of other files.
+fn paths_in<'a>(value: &'a str, files: &HashSet<String>) -> (Vec<(&'a str, String)>, bool) {
+    let value = value.trim();
+    let value = value.strip_prefix("./").unwrap_or(value);
+    // Whole first, since a name with a space in it is found only so.
+    if let Some(file) = input_file(value, files) {
+        return (vec![(value, file)], false);
+    }
+    let (mut paths, mut text) = (Vec::new(), false);
+    // A part after a `#` or `:` runs to a space or a semicolon, as in
+    // `a.md#S-1|S-2`, `a.csv#row,col` or `a.json:items[0]`.
+    for chunk in value.split(|c: char| c.is_whitespace() || c == ';') {
+        let head = chunk.split(['#', ':']).next().unwrap_or_default();
+        for piece in head.split(|c: char| ",|()[]{}<>\"'`".contains(c)) {
+            let piece = piece.trim_matches('*').trim_end_matches(['.', '!', '?']);
+            let path = piece.strip_prefix("./").unwrap_or(piece);
+            if let Some(file) = input_file(path, files) {
+                paths.push((path, file));
+            } else if piece.chars().any(char::is_alphanumeric)
+                && !["and", "or"].contains(&piece.to_lowercase().as_str())
+                && !file_like(piece)
+            {
+                text = true;
+            }
+        }
+    }
+    (paths, text)
+}
+
+/// Whether `word` is the name or path of a file, as `notes.md` and
+/// `docs/a.md` are, and so no text added to a path.
+fn file_like(word: &str) -> bool {
+    let kind = kind(word);
+    word.contains(['/', '\\'])
+        || ((1..=5).contains(&kind.len()) && kind.chars().any(char::is_alphabetic))
+}
+
+/// `found`'s values, each once, cut to `SHOWN` characters and with its line
+/// where known, as far as `LINES` go, and how many more there are.
+fn sample(found: &[(Option<usize>, &str)]) -> String {
+    let (mut seen, mut shown) = (HashSet::new(), Vec::new());
+    for (line, value) in found {
+        let mut value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        if value.chars().count() > SHOWN {
+            value = value.chars().take(SHOWN).collect::<String>() + "...";
+        }
+        // Values alike as far as shown would read as one given twice.
+        if !seen.insert(value.clone()) {
+            continue;
+        }
+        shown.push(match line {
+            Some(line) => format!("`{value}` (line {line})"),
+            None => format!("`{value}`"),
+        });
+    }
+    let more = match shown.len().saturating_sub(LINES) {
+        0 => String::new(),
+        more => format!(" and {more} more"),
+    };
+    shown.truncate(LINES);
+    shown.join(", ") + &more
+}
+
+/// What `field` of `name` holds that no input gives, where each of
+/// `records` cites in its other fields one id of an input's column of ids,
+/// a different one each and all of them, so is that input's item under an
+/// id of the run's own; not where one holds that id in a field for ids,
+/// which links it to the item as a record of its own.
+fn made_up(name: &str, field: &str, output: &Output, records: &[Cited]) -> Option<String> {
+    // Mixed with ids given to the run, a field may rightly hold new ones too.
+    let fresh = |value: &str| {
+        let value = value.trim();
+        id_like(value) && !output.ids.given.contains(&value.to_lowercase())
+    };
+    if records.len() < 2 || !records.iter().all(|(_, value, _)| fresh(value)) {
+        return None;
+    }
+    // The ids each record's other fields hold, and those its fields for ids
+    // hold, found once, as a file of many rows would take long otherwise.
+    let cites: Vec<(HashSet<String>, HashSet<String>)> = (records.iter())
+        .map(|(_, _, others)| {
+            let (mut said, mut linked) = (HashSet::new(), HashSet::new());
+            for (key, text) in others {
+                let found = if id_named(key) {
+                    &mut linked
+                } else {
+                    &mut said
+                };
+                found.extend(id_words(text));
+            }
+            (said, linked)
+        })
+        .collect();
+    for codes in &output.codes {
+        if !codes.column.as_deref().is_some_and(id_named) || codes.codes.len() != records.len() {
+            continue;
+        }
+        let index: HashMap<String, usize> = (codes.codes.iter().enumerate())
+            .map(|(n, id)| (id.to_lowercase(), n))
+            .collect();
+        // Where in the column the id each record cites is.
+        let (mut cited, mut seen) = (Vec::new(), HashSet::new());
+        for (said, linked) in &cites {
+            let mut hits = said.iter().filter_map(|word| index.get(word));
+            let (Some(&n), None) = (hits.next(), hits.next()) else {
+                break;
+            };
+            if linked.iter().any(|word| index.contains_key(word)) || !seen.insert(n) {
+                break;
+            }
+            cited.push(n);
+        }
+        let Some(&first) = cited.first().filter(|_| cited.len() == records.len()) else {
+            continue;
+        };
+        let values: Vec<(Option<usize>, &str)> = (records.iter())
+            .map(|(line, value, _)| (*line, value.trim()))
+            .collect();
+        return Some(format!(
+            "`{name}` has `{field}` values no input gives: {}; each record cites one item of `{}` by its id, as `{}`, so refer to items by the ids the inputs give them.",
+            sample(&values),
+            codes.input,
+            codes.codes[first]
+        ));
+    }
+    None
+}
+
+/// Adds to `found` each string `value` holds, itself or in its lists and
+/// objects.
+fn strings<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
+    match value {
+        Value::String(text) => found.push(text),
+        Value::Array(items) => items.iter().for_each(|item| strings(item, found)),
+        Value::Object(map) => map.values().for_each(|inner| strings(inner, found)),
+        _ => {}
+    }
+}
+
+/// What is wrong with the header `head` of CSV `output` against the columns
+/// its request names in prose: one missing, or another order where it gives
+/// one.
+fn columns(output: &Output, head: &[String]) -> Option<String> {
+    let name = &output.path;
+    let quoted = |columns: Vec<&String>| {
+        let columns: Vec<String> = columns.iter().map(|column| format!("`{column}`")).collect();
+        columns.join(", ")
+    };
+    let missing: Vec<&String> = (output.columns.iter())
+        .filter(|column| !head.contains(column))
+        .collect();
+    if !missing.is_empty() {
+        let missing = quoted(missing);
+        return Some(format!(
+            "`{name}` lacks columns the request names: {missing}."
+        ));
+    }
+    let at: Vec<usize> = (output.columns.iter())
+        .filter_map(|column| head.iter().position(|field| field == column))
+        .collect();
+    if !output.ordered || at.is_sorted() {
+        return None;
+    }
+    let found = quoted(
+        head.iter()
+            .filter(|field| output.columns.contains(field))
+            .collect(),
+    );
+    let given = quoted(output.columns.iter().collect());
+    Some(format!(
+        "`{name}` has the columns the request names in the order {found} where it gives {given}."
+    ))
+}
+
+/// What is wrong with `name`, which should be a `what`: a zip holding `part`.
+fn office(name: &str, bytes: &[u8], what: &str, part: &str) -> Vec<String> {
+    if !bytes.starts_with(b"PK\x03\x04") {
+        return vec![format!(
+            "`{name}` is not a real {what}: it must be a zip file, and it is not one."
+        )];
+    }
+    // A zip stores each name as it is, so a scan finds it with no zip reader.
+    if !bytes
+        .windows(part.len())
+        .any(|window| window == part.as_bytes())
+    {
+        return vec![format!("`{name}` is not a real {what}: it has no {part}.")];
+    }
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::tests::Scratch;
+
+    /// The paths `contract` asks for, in order.
+    fn paths(contract: &Contract) -> Vec<&str> {
+        contract
+            .outputs
+            .iter()
+            .map(|output| output.path.as_str())
+            .collect()
+    }
+
+    /// What is wrong with the files `request` asks for, after `files` are
+    /// written into a workspace of their own once it is read, as a run would.
+    fn checked(request: &str, files: &[(&str, &[u8])]) -> Vec<String> {
+        let dir = Scratch::new("contract");
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        let contract = from_request(request, &dir);
+        for (path, bytes) in files {
+            std::fs::write(dir.join(path), bytes).unwrap();
+        }
+        problems(&contract, &dir)
+    }
+
+    /// What is wrong with the files `request` asks for, as `checked` finds
+    /// it, with `inputs` there in the workspace before the request is read.
+    fn checked_reading(
+        inputs: &[(&str, &str)],
+        request: &str,
+        files: &[(&str, &[u8])],
+    ) -> Vec<String> {
+        let dir = Scratch::new("contract-inputs");
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        for (path, text) in inputs {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let contract = from_request(request, &dir);
+        for (path, bytes) in files {
+            std::fs::write(dir.join(path), bytes).unwrap();
+        }
+        problems(&contract, &dir)
+    }
+
+    #[test]
+    fn a_path_under_out_named_in_the_request_is_required() {
+        let dir = Scratch::new("contract-paths");
+        let workspace = dir.display().to_string().replace('\\', "/");
+        let request = format!(
+            "Read:\n- {workspace}/in/sales.csv\n\nCreate:\n- {workspace}/out/summary.json\n\
+             - Write **`out/notes.md`** too, and `out/notes.md` again.\n\
+             - Then out/sales_<region>.csv for each region, and /elsewhere/out/x.csv."
+        );
+        let contract = from_request(&request, &dir);
+        assert_eq!(paths(&contract), ["out/summary.json", "out/notes.md"]);
+    }
+
+    #[test]
+    fn a_file_elsewhere_counts_only_by_its_whole_path_where_asked_outright() {
+        let dir = Scratch::new("contract-elsewhere");
+        let workspace = dir.display().to_string().replace('\\', "/");
+        let request = format!(
+            "Also create `{workspace}/db/check_report.md` describing the duplicates.\n\
+             - Write {workspace}/notes/a.json and {workspace}/notes/b.json.\n\
+             Save the chart as {workspace}/docs/chart.png.\n\
+             Write {workspace}/in/audit.json when the exporter runs.\n\
+             Write a script that saves {workspace}/data/x.json.\n\
+             Add a tool to generate {workspace}/data/y.json.\n\
+             Create a summary of {workspace}/in/notes.md in out/summary.md.\n\
+             Read these to write the outputs:\n- {workspace}/in/rules.md\n\n\
+             Create progress.md and docs/plan.md. Do not write {workspace}/z.json."
+        );
+        let contract = from_request(&request, &dir);
+        assert_eq!(
+            paths(&contract),
+            [
+                "db/check_report.md",
+                "notes/a.json",
+                "notes/b.json",
+                "docs/chart.png",
+                "out/summary.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_asked_for_by_its_whole_path_is_checked_as_one_under_out_is() {
+        let dir = Scratch::new("contract-elsewhere-checked");
+        let workspace = dir.display().to_string().replace('\\', "/");
+        let request = format!(
+            "Write {workspace}/data/state.json with keys: run, done.\n\
+             Also create {workspace}/docs/notes.md."
+        );
+        let contract = from_request(&request, &dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data/state.json"), br#"{"run": 1}"#).unwrap();
+        assert_eq!(
+            problems(&contract, &dir),
+            [
+                "`data/state.json` lacks keys the request names: `done`.",
+                "`docs/notes.md` does not exist.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_the_request_says_not_to_create_yet_is_not_required() {
+        let request = "Create out/state.json and out/partial.json. \
+                       Do not create out/final.json or out/ledger.csv yet.\n\
+                       out/extra.md is optional.";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(paths(&contract), ["out/state.json", "out/partial.json"]);
+    }
+
+    #[test]
+    fn a_file_named_to_be_read_removed_or_as_an_example_is_not_required() {
+        let request = "Read out/state.json, out/tmp/draft.json and in/notice.json.\n\n\
+                       Read:\n- out/partial.json\n\n\
+                       Update/create:\n- out/state.json\n- out/report.md\n\
+                       - remove out/tmp/draft.json\n\n\
+                       Write every spam id to out/delete_ids.txt.\n\
+                       Write each reply to out/replies/<id>.txt (e.g. out/replies/002.txt).";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(
+            paths(&contract),
+            ["out/state.json", "out/report.md", "out/delete_ids.txt"]
+        );
+    }
+
+    #[test]
+    fn json_wrapped_in_a_markdown_fence_is_reported() {
+        let problems = checked(
+            "Write out/answer.json.",
+            &[("out/answer.json", b"```json\n{\"ok\": true}\n```\n")],
+        );
+        assert_eq!(
+            problems,
+            ["`out/answer.json` is wrapped in a ``` fence; it must hold the JSON alone."]
+        );
+    }
+
+    #[test]
+    fn a_csv_row_with_an_unquoted_comma_is_reported_with_its_line() {
+        let csv =
+            b"id,note\n1,\"quoted, so fine\"\n2,\"runs\nover a line\"\n3,not quoted, so wrong\n";
+        let problems = checked("Write out/notes.csv.", &[("out/notes.csv", csv)]);
+        assert_eq!(
+            problems,
+            [
+                "`out/notes.csv` line 5 has 3 fields where the header has 2; a field holding a comma must be in double quotes."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_header_given_in_the_request_must_match_exactly() {
+        let request = "Create:\n- out/audit.csv\n- out/rows.csv\n\n\
+                       Output columns, in this exact order:\nid,name,amount\n\n\
+                       Read in/source.csv, whose header: a,b\n\
+                       audit.csv requirements:\n- Exact header:\n  id,name,amount\n";
+        let contract = from_request(request, Path::new("/workspace"));
+        let headers: Vec<Option<&str>> = contract
+            .outputs
+            .iter()
+            .map(|output| output.header.as_deref())
+            .collect();
+        // The header after the list is rows.csv's, the CSV named last before
+        // it, and the input's header is no output's.
+        assert_eq!(headers, [Some("id,name,amount"), Some("id,name,amount")]);
+
+        let wrong = b"id,amount,name\n1,2,x\n";
+        let right = b"\"id\",name,amount\n1,x,2\n";
+        let problems = checked(
+            request,
+            &[("out/audit.csv", wrong), ("out/rows.csv", right)],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/audit.csv` has the header `id,amount,name` where the request gives `id,name,amount`."
+            ]
+        );
+    }
+
+    #[test]
+    fn json_keys_the_request_names_must_be_somewhere_in_the_file() {
+        let request = "Create out/audit.json.\n\
+                       audit.json requirements:\n\
+                       - Valid JSON with keys: matched, `severity_by_metric`, and reasons.\n\
+                       - idempotency_keys: one per item";
+        let json = br#"{"matched": [], "reasons": [{"severity": "low"}]}"#;
+        let problems = checked(request, &[("out/audit.json", json)]);
+        assert_eq!(
+            problems,
+            ["`out/audit.json` lacks keys the request names: `severity_by_metric`."]
+        );
+    }
+
+    #[test]
+    fn a_docx_that_is_not_a_zip_is_reported() {
+        let problems = checked(
+            "Save the report as out/report.docx and the chart as out/chart.png.",
+            &[
+                ("out/report.docx", b"# Report\nWritten as markdown."),
+                ("out/chart.png", b"\x89PNG\r\n\x1a\n...."),
+            ],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/report.docx` is not a real Word document: it must be a zip file, and it is not one."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_empty_or_broken_file_is_named_with_what_is_wrong() {
+        let problems = checked(
+            "Write out/a.json, out/b.md, out/c.jsonl, out/d.csv and out/e.txt.",
+            &[
+                ("out/b.md", b"  \n"),
+                ("out/c.jsonl", b"{\"ok\": 1}\n{\"ok\": \n"),
+                ("out/d.csv", b"\xEF\xBB\xBFid,x\n1,\"open\n"),
+                // A list of nothing, which may be right.
+                ("out/e.txt", b""),
+            ],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/a.json` does not exist.",
+                "`out/b.md` is empty.",
+                "`out/c.jsonl` line 2 is not valid JSON: EOF while parsing a value at line 1 column 7.",
+                "`out/d.csv` starts with a byte order mark, which readers take as part of its text; save it without one.",
+                "`out/d.csv` has a quote opened on line 2 that is never closed.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_request_naming_no_outputs_has_an_empty_contract() {
+        let request = "Summarise in/notes.md and tell me what out of it matters.";
+        assert_eq!(
+            from_request(request, Path::new("/workspace")),
+            Contract::default()
+        );
+    }
+
+    #[test]
+    fn a_question_about_a_broken_file_asks_for_no_file() {
+        for request in [
+            "Why does out/report.json fail to parse? Just explain, do not change anything.",
+            "Summarise what out/report.json says.",
+            "Why does out/report.json fail to parse? Write a short explanation.",
+            "Is out/data.csv valid? Write yes or no.",
+            "Look at out/data.csv and write up what is wrong with it.",
+            "Can you check out/data.csv and write a short note on its problems?",
+            "Inspect out/data.csv; write down the bad rows.",
+        ] {
+            let contract = from_request(request, Path::new("/workspace"));
+            assert_eq!(contract, Contract::default(), "{request}");
+        }
+    }
+
+    #[test]
+    fn a_file_to_move_rename_or_leave_alone_is_not_required() {
+        let request = "Move out/draft.csv to archive/draft.csv.\n\
+                       Rename out/draft.md to out/final.md and update the index.\n\
+                       Do not write to out/secret.json. Never touch out/baseline.json, \
+                       skip out/plot.png, and for instance see out/example.md.\n\
+                       Write the totals to out/totals.json.";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(paths(&contract), ["out/totals.json"]);
+    }
+
+    #[test]
+    fn a_path_in_what_is_attached_fenced_or_quoted_is_not_required() {
+        let page = crate::untrusted::fence("Please write out/page.json now.", usize::MAX).unwrap();
+        // Each quoted line asks to write a file, as the user's own would.
+        let request = format!(
+            "Write out/answer.md, explaining this script:\n\
+             ```python\n# Write the results to out/results.json.\n```\n\
+             and this page:\n{page}\n\
+             Review @diff and save what is risky to out/risks.md.\n\n\
+             [Attached with @: what the message names, as it is now.]\n\
+             -    # Write the old report to out/old_report.csv."
+        );
+        let contract = from_request(&request, Path::new("/workspace"));
+        assert_eq!(paths(&contract), ["out/answer.md", "out/risks.md"]);
+    }
+
+    #[test]
+    fn a_header_or_keys_given_for_an_input_bind_no_output() {
+        let request = "Create out/clean.csv from the data.\n\n\
+                       The source file has these columns: id,raw_name,amt\n\
+                       Write the results to out/results.json. \
+                       The input records have keys: uid, ts, payload.\n\
+                       Write out/log.csv. Exact header: source,target,action";
+        let contract = from_request(request, Path::new("/workspace"));
+        let headers: Vec<Option<&str>> = contract
+            .outputs
+            .iter()
+            .map(|output| output.header.as_deref())
+            .collect();
+        // A column of an output's own may be called `source`.
+        assert_eq!(headers, [None, None, Some("source,target,action")]);
+        assert!(contract.outputs.iter().all(|output| output.keys.is_empty()));
+    }
+
+    #[test]
+    fn json_with_the_nan_and_infinity_python_writes_is_valid() {
+        let problems = checked(
+            "Write out/rows.jsonl and out/stats.json with keys: mean, max.",
+            &[
+                (
+                    "out/stats.json",
+                    br#"{"mean": NaN, "max": Infinity, "note": "NaN"}"#,
+                ),
+                ("out/rows.jsonl", b"{\"min\": -Infinity}\n{\"min\": Nan}\n"),
+            ],
+        );
+        assert_eq!(
+            problems,
+            ["`out/rows.jsonl` line 2 is not valid JSON: expected value at line 1 column 9."]
+        );
+    }
+
+    #[test]
+    fn json_broken_after_a_nan_is_reported_where_it_breaks() {
+        let problems = checked(
+            "Write out/stats.json.",
+            &[("out/stats.json", br#"{"a": NaN, "b": }"#)],
+        );
+        assert_eq!(
+            problems,
+            ["`out/stats.json` is not valid JSON: expected value at line 1 column 17."]
+        );
+    }
+
+    #[test]
+    fn a_list_under_a_heading_that_says_not_to_create_it_is_not_required() {
+        let request = "Create out/state.json now.\n\n\
+                       Do not create these yet:\n- out/final.json\n- out/ledger.csv\n\n\
+                       Never write these files:\n- out/secret.json\n\n\
+                       Don't create the following yet:\n1. out/later.json\n\n\
+                       Outputs (create later, not now):\n- out/final2.json\n\n\
+                       Create these in round 2, not now:\n- out/round2.json\n\n\
+                       Outputs:\n- out/report.md";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(paths(&contract), ["out/state.json", "out/report.md"]);
+    }
+
+    #[test]
+    fn a_file_the_request_says_not_to_make_in_other_words_is_not_required() {
+        let request = "Create out/a.json. Don't make out/b.json yet.\n\
+                       Do not generate out/c.md in this round. Never produce out/d.csv.\n\
+                       Do not save anything to out/e.json, and do not overwrite out/f.json.\n\
+                       Finish the run without creating out/g.json.\n\
+                       Write out/x.csv without a BOM.\n\n\
+                       Do not produce these files:\n- out/h.json\n- out/i.csv\n\n\
+                       Outputs:\n- out/y.json\n\n\
+                       **Do not create these yet:**\n- out/j.json\n\n\
+                       Create:\n- out/z.json\n1. Do not create these yet:\n   - out/k.json\n\
+                       - **Not yet** (round 2):\n  - out/l.json\n- out/w.json";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(
+            paths(&contract),
+            [
+                "out/a.json",
+                "out/x.csv",
+                "out/y.json",
+                "out/z.json",
+                "out/w.json"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_header_or_keys_under_another_outputs_heading_bind_no_earlier_file() {
+        let request = "Create:\n- out/ledger.csv\n- out/state.json\n- out/report.md\n\n\
+                       report.md requirements:\n\
+                       - End with a table whose header row is: metric,value\n\
+                       - Start with a YAML front-matter block with keys: title, date.";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(
+            paths(&contract),
+            ["out/ledger.csv", "out/state.json", "out/report.md"]
+        );
+        assert!(
+            contract
+                .outputs
+                .iter()
+                .all(|output| output.header.is_none())
+        );
+        assert!(contract.outputs.iter().all(|output| output.keys.is_empty()));
+    }
+
+    #[test]
+    fn a_header_or_keys_given_for_another_file_bind_no_earlier_one() {
+        let request = "Create:\n- out/ledger.csv: one row per invoice\n\
+                       - out/state.json with keys: run, done\n\
+                       - out/notes.txt listing keys: x, y\n\
+                       - out/report.md: a markdown table with columns: metric,value, \
+                       and YAML front matter with keys: title, date";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(contract.outputs[1].keys, ["run", "done"]);
+        let problems = checked(
+            request,
+            &[
+                ("out/ledger.csv", b"invoice,amount\n1,2\n"),
+                ("out/state.json", br#"{"run": 1, "done": true}"#),
+                ("out/notes.txt", b"x\n"),
+                ("out/report.md", b"---\ntitle: t\n---\n"),
+            ],
+        );
+        assert_eq!(problems, Vec::<String>::new());
+
+        for request in [
+            "Create out/results.csv. Also update docs/README.md with a table whose header row is: name,value",
+            "Create out/results.csv. Also add a table to the README whose header row is: name,value",
+        ] {
+            let contract = from_request(request, Path::new("/workspace"));
+            assert_eq!(contract.outputs[0].header, None, "{request}");
+        }
+    }
+
+    #[test]
+    fn a_file_only_read_by_what_is_made_is_not_required() {
+        let request = "Write a function that parses out/data.csv.\n\
+                       Create a test that loads out/fixture.json.\n\
+                       Write a README explaining what out/report.json contains.\n\
+                       Make the plot script handle empty input; it reads out/raw.csv.\n\
+                       Read out/state.json and write out/summary.json.";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(paths(&contract), ["out/summary.json"]);
+    }
+
+    #[test]
+    fn the_load_report_or_what_a_script_writes_is_still_required() {
+        let request = "Write the load report to out/load.json.\n\
+                       Write the parse errors to out/errors.json and the read counts to out/reads.csv.\n\
+                       Make a script; it reads out/data.csv and writes out/plot.png.";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(
+            paths(&contract),
+            [
+                "out/load.json",
+                "out/errors.json",
+                "out/reads.csv",
+                "out/plot.png"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_header_in_a_code_block_after_its_colon_is_read() {
+        for fence in ["```", "~~~"] {
+            let request = format!(
+                "Create out/sales.csv with this header:\n{fence}csv\nregion,total\n{fence}"
+            );
+            let contract = from_request(&request, Path::new("/workspace"));
+            assert_eq!(paths(&contract), ["out/sales.csv"], "{fence}");
+            assert_eq!(contract.outputs[0].header.as_deref(), Some("region,total"));
+        }
+    }
+
+    #[test]
+    fn a_file_there_before_the_run_is_checked_only_once_it_changes() {
+        let dir = Scratch::new("contract-before");
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        std::fs::write(dir.join("out/data.csv"), "id,note\n1,a, b\n").unwrap();
+        // Loose wording this reading takes for a request to make the file.
+        let request = "Go over out/data.csv and write up what is wrong with it.";
+        let contract = from_request(request, &dir);
+        assert_eq!(paths(&contract), ["out/data.csv"]);
+        assert_eq!(problems(&contract, &dir), Vec::<String>::new());
+
+        std::fs::write(dir.join("out/data.csv"), "id,note\n1,a, b, c\n").unwrap();
+        assert_eq!(
+            problems(&contract, &dir),
+            [
+                "`out/data.csv` line 2 has 4 fields where the header has 2; a field holding a comma must be in double quotes."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_left_out_in_more_words_is_not_required() {
+        let request = "Create out/a.json but not out/b.json, and out/c.json, not out/d.json.\n\
+                       Write out/e.json only; no out/f.json.\n\
+                       It is forbidden to write out/g.json. Dont create out/h.json.\n\
+                       Do not, under any circumstances, write out/i.json.\n\
+                       Do not ever write out/j.json. Do not try to create out/k.json.\n\
+                       Finish while avoiding writing out/l.json. No need to create out/m.json.\n\
+                       Do not forget to write out/n.json.\n\n\
+                       Create:\n- out/o.json\n- Later:\n  - out/p.json\n- out/q.json\n\n\
+                       Create these later:\n- out/r.json\n\n\
+                       Write out/s.md, explaining:\n~~~\nWrite out/t.json\n~~~";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(
+            paths(&contract),
+            [
+                "out/a.json",
+                "out/c.json",
+                "out/e.json",
+                "out/n.json",
+                "out/o.json",
+                "out/q.json",
+                "out/s.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn columns_or_keys_to_drop_or_group_by_are_no_outputs_header_or_keys() {
+        let request = "Write out/clean.csv and out/clean.json.\n\
+                       Drop the columns: tmp,debug\n\
+                       Group by the columns: region,month\n\
+                       Exclude the keys: password, ssn\n\
+                       Do not include the keys: debug, tmp";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(paths(&contract), ["out/clean.csv", "out/clean.json"]);
+        assert_eq!(contract.outputs[0].header, None);
+        assert!(contract.outputs[1].keys.is_empty());
+    }
+
+    #[test]
+    fn a_header_or_keys_bind_to_the_one_file_their_sentence_names() {
+        let request = "Write out/a.csv and out/b.csv. The header of a.csv is: id,name. \
+                       The header of b.csv is: x,y\n\
+                       Write out/a.json and out/b.json. The keys of a.json are: id, name. \
+                       b.json has keys: x, y";
+        let contract = from_request(request, Path::new("/workspace"));
+        let headers: Vec<Option<&str>> = contract
+            .outputs
+            .iter()
+            .map(|output| output.header.as_deref())
+            .collect();
+        assert_eq!(headers, [Some("id,name"), Some("x,y"), None, None]);
+        assert_eq!(contract.outputs[2].keys, ["id", "name"]);
+        assert_eq!(contract.outputs[3].keys, ["x", "y"]);
+    }
+
+    #[test]
+    fn the_values_a_field_must_be_one_of_are_read_however_the_request_lists_them() {
+        let request = "Write out/a.json.\n\
+                       - `decision` must be one of `accept`, `reject`, or `hold_for_review`.\n\
+                       - status must be one of: open, closed, stale.\n\
+                       - `kind` should be exactly `unit` or `integration`.\n\
+                       - level: one of low, high\n\
+                       - The tier column can only be either gold or silver.\n\
+                       - size ∈ { small, large }.\n\
+                       - `label` must be exactly one of:\n  - `spam`\n  - `ham`\n\
+                       - `team` must be one of the following:\n  `ops`, `dev`\n\
+                       - `mode` is `fast` or `slow`.\n\
+                       - 'tone' must be one of calm, firm.";
+        let contract = from_request(request, Path::new("/workspace"));
+        let read: Vec<(&str, Vec<&str>, bool)> = contract.outputs[0]
+            .values
+            .iter()
+            .map(|values| {
+                let allowed = values.allowed.iter().map(String::as_str).collect();
+                (values.field.as_str(), allowed, values.quoted)
+            })
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (
+                    "decision",
+                    vec!["accept", "reject", "hold_for_review"],
+                    true
+                ),
+                ("status", vec!["open", "closed", "stale"], false),
+                ("kind", vec!["unit", "integration"], true),
+                ("level", vec!["low", "high"], false),
+                ("tier", vec!["gold", "silver"], false),
+                ("size", vec!["small", "large"], false),
+                ("label", vec!["spam", "ham"], true),
+                ("team", vec!["ops", "dev"], true),
+                ("mode", vec!["fast", "slow"], true),
+                ("tone", vec!["calm", "firm"], false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_value_the_request_does_not_list_for_a_field_is_reported() {
+        let request = "Write out/ledger.csv with columns id,status and out/runs.jsonl.\n\
+                       - In ledger.csv, `status` must be one of `matched`, `unmatched` or `duplicate`.\n\
+                       - In runs.jsonl, verdict must be one of pass, fail.";
+        let ledger = b"id,status\n1,matched\n2,reconciled\n3,\n4,pending\n5,reconciled\n";
+        let runs = b"{\"verdict\": \"pass\"}\n{\"verdict\": \"PASS\"}\n{\"verdict\": \"passed\"}\n";
+        let problems = checked(
+            request,
+            &[("out/ledger.csv", ledger), ("out/runs.jsonl", runs)],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/ledger.csv` has `status` values the request does not list: `reconciled` (line 3), `pending` (line 5); it lists `matched`, `unmatched`, `duplicate`.",
+                "`out/runs.jsonl` has `verdict` values the request does not list: `passed` (line 3); it lists `pass`, `fail`.",
+            ]
+        );
+    }
+
+    #[test]
+    fn values_given_as_examples_or_for_some_rows_only_are_not_held_to() {
+        let request = "Write out/a.csv with columns id,status,notes,reason,mode.\n\
+                       - Use a short status word, e.g. `ok`, `late` or `missing`.\n\
+                       - `status` must be one of `ok`, `late`, etc.\n\
+                       - `status` must be one of the codes listed above.\n\
+                       - If the row is late, `status` must be one of `late` or `lost`.\n\
+                       - For rejected rows, `reason` must be one of `a`, `b`.\n\
+                       - `notes` must be short, factual or blank.\n\
+                       - `mode` is fast or slow.\n\
+                       - `status` must not be one of `x`, `y`.\n\
+                       - `status` should be one of `ok`, `late` (or a word you choose).\n\
+                       - For late rows:\n  - `reason` must be one of `traffic`, `weather`.\n\
+                       For late rows:\n\
+                       - `reason` must be one of `traffic`, `weather`.";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(contract.outputs[0].values, []);
+    }
+
+    #[test]
+    fn values_or_keys_given_for_a_file_only_read_bind_no_output() {
+        let request = "Write out/summary.csv and out/summary.json.\n\
+                       Read in/orders.csv, whose `status` is one of `paid` or `void`.\n\
+                       The input `kind` column is one of `a`, `b`.\n\
+                       In in/items.json each item has keys: sku, qty.";
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(paths(&contract), ["out/summary.csv", "out/summary.json"]);
+        assert!(
+            (contract.outputs.iter())
+                .all(|output| output.values.is_empty() && output.each.is_empty())
+        );
+    }
+
+    #[test]
+    fn listed_values_in_another_case_left_empty_or_in_another_place_pass() {
+        let request = "Write out/a.csv and out/b.json.\n\
+                       - In a.csv, status must be one of pass, fail.\n\
+                       - In a.csv, `score` must be one of 1, 2 or 3.\n\
+                       - In b.json, `status` must be one of `pass` or `fail`.\n\
+                       - In b.json, `grade` must be one of `x`, `y`.";
+        let csv = b"id,status,score\n1,Pass,2\n2,FAIL,3.0\n3,,1\n";
+        // The run's own status is no result's, and `grade` is not there.
+        let json =
+            br#"{"status": "complete", "results": [{"status": "pass"}, {"status": "fail"}]}"#;
+        let problems = checked(request, &[("out/a.csv", csv), ("out/b.json", json)]);
+        assert_eq!(problems, Vec::<String>::new());
+    }
+
+    #[test]
+    fn keys_named_for_each_item_must_be_in_every_item_of_the_list() {
+        let request = "Write out/meetings.json, an object with a `meetings` array. \
+                       Each meeting must include: start, end, room.\n\
+                       Write out/events.jsonl; each line has keys: ts, kind.\n\
+                       Write out/log.jsonl with keys: at, what.\n\
+                       Write out/orders.json with key `orders`.\n\
+                       - Each order must include `order_id` and `lines`.\n\
+                       - Each line item must include `sku` and `qty`.";
+        // As the run wrote them: the shared key once at the top, not in
+        // each item.
+        let meetings =
+            br#"{"room": "B2", "meetings": [{"start": 1, "end": 2}, {"start": 3, "end": 4}]}"#;
+        let events = b"{\"ts\": 1, \"kind\": \"a\"}\n{\"ts\": 2}\n{\"ts\": 3, \"kind\": \"b\"}\n";
+        let log = b"{\"at\": 1}\n{\"at\": 2}\n";
+        let orders = br#"{"orders": [
+            {"order_id": 1, "lines": [{"sku": "a", "qty": 1}]},
+            {"order_id": 2, "lines": [{"sku": "c"}]}
+        ]}"#;
+        let problems = checked(
+            request,
+            &[
+                ("out/meetings.json", meetings),
+                ("out/events.jsonl", events),
+                ("out/log.jsonl", log),
+                ("out/orders.json", orders),
+            ],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/meetings.json` lacks keys the request names for each item, in the 2 items of `meetings`: `room` (missing from 2).",
+                "`out/events.jsonl` lacks keys the request names for each item, in its 3 lines: `kind` (missing from 1).",
+                "`out/log.jsonl` lacks keys the request names: `what`.",
+                "`out/orders.json` lacks keys the request names for each item, in the 2 items of `orders[].lines`: `qty` (missing from 1).",
+            ]
+        );
+    }
+
+    #[test]
+    fn keys_named_for_each_item_ask_nothing_of_lists_that_hold_none_of_them() {
+        let request = "Write out/one.json, out/keyed.json and out/mixed.json.\n\
+                       - In one.json, each finding must include id, severity.\n\
+                       - In keyed.json, each value must contain total, owner.\n\
+                       - In mixed.json, each finding must include `id` and `severity`.\n\
+                       - In mixed.json, each item may include `note`.\n\
+                       - In mixed.json, each ticket's `tags` include `urgent`.";
+        let one = br#"{"id": "F1", "severity": "high", "notes": [{"text": "x"}]}"#;
+        let keyed =
+            br#"{"A": {"total": 1, "owner": 2, "rows": [{"n": 1}]}, "B": {"total": 3, "owner": 4}}"#;
+        let mixed = br#"{"run": [{"id": 1}], "findings": [{"id": 2, "severity": "low"}]}"#;
+        let problems = checked(
+            request,
+            &[
+                ("out/one.json", one),
+                ("out/keyed.json", keyed),
+                ("out/mixed.json", mixed),
+            ],
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let contract = from_request(request, Path::new("/workspace"));
+        assert_eq!(contract.outputs[2].each, [["id", "severity"]]);
+    }
+
+    #[test]
+    fn columns_named_in_prose_must_be_there_and_in_the_order_asked_for() {
+        let request = "Write out/a.csv with columns, in this order: `id`, `name`, `total`.\n\
+                       Write out/b.csv with columns `region`, `amount` and `notes` (optional).\n\
+                       Write out/c.csv. Its header must include: id, owner, status";
+        let problems = checked(
+            request,
+            &[
+                ("out/a.csv", b"id,total,name\n1,2,x\n"),
+                ("out/b.csv", b"amount,region,extra\n1,north,y\n"),
+                ("out/c.csv", b"status,id,state\n1,2,3\n"),
+            ],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/a.csv` has the columns the request names in the order `id`, `total`, `name` where it gives `id`, `name`, `total`.",
+                "`out/c.csv` lacks columns the request names: `owner`.",
+            ]
+        );
+    }
+
+    #[test]
+    fn terms_a_request_says_a_file_must_cover_must_be_in_that_file_as_written() {
+        let request = "Create:\n- out/rationale.md\n- out/report.csv\n\n\
+                       Requirements for rationale.md:\n\
+                       - Mention `evidence_log` gaps and CLAIM-1 … CLAIM-3.\n\
+                       - Use the remediation verbs soften, remove, and qualify.\n\n\
+                       Create also:\n- out/notes.md\n  Must explicitly cover: INTERNAL-2, verbs keep/drop.";
+        // A heading in words and a range left short; a verb in another form
+        // ("softened") still covers it.
+        let rationale =
+            b"## Evidence log\nCLAIM-1 and CLAIM-3 were softened; remove one; qualify two.\n";
+        let notes = b"internal-2 holds. We keep one and drop two.\n";
+        let problems = checked(
+            request,
+            &[
+                ("out/rationale.md", rationale),
+                ("out/report.csv", b"id,total\n1,2\n"),
+                ("out/notes.md", notes),
+            ],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/rationale.md` lacks terms the request names for it: `evidence_log`, `CLAIM-2`; write each as the request does."
+            ]
+        );
+    }
+
+    #[test]
+    fn terms_written_in_any_case_or_with_markdown_escapes_pass() {
+        let request =
+            "Write out/notes.md. It must mention `risk_flag_set`, PLAN-B and SEC-1 to SEC-2.";
+        let notes = b"The risk\\_flag\\_set field, plan-b, (SEC-1) and SEC-2: done.\n";
+        assert_eq!(
+            checked(request, &[("out/notes.md", notes)]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn terms_asked_for_in_a_case_not_to_be_said_or_standing_for_many_are_not_held_to() {
+        let request = "Write out/a.md, out/b.md and out/c.csv.\n\n\
+                       Requirements for a.md:\n\
+                       - Do not mention `secret_key`.\n\
+                       - Must cover every claim_id from claims.csv; do not add extra claim_ids.\n\
+                       - If a row is late, mention `late_reason`.\n\
+                       - Payments that reference a missing order_id are orphans.\n\
+                       - Explain each change, e.g. mention `old_value`.\n\
+                       - Mention `grand_total` from out/c.csv.\n\
+                       - Use the words fast or slow.\n\n\
+                       b.md must list the runs and mention each failed test_id.";
+        let problems = checked(
+            request,
+            &[
+                ("out/a.md", b"# Notes\n"),
+                ("out/b.md", b"# Runs\n"),
+                ("out/c.csv", b"id,total\n1,2\n"),
+            ],
+        );
+        assert_eq!(problems, Vec::<String>::new());
+    }
+
+    #[test]
+    fn wording_the_request_or_a_file_it_names_forbids_is_reported_where_repeated() {
+        let rules = "# Rules\n\nDo not state:\n- route closed\n- driver at fault\n";
+        let request = "Read in/rules.md.\n\nCreate:\n- out/summary.md\n- out/log.csv\n\
+                       - out/fixed_copy.md\n\n\
+                       Requirements for fixed_copy.md:\n\
+                       - Do not include the phrases: always on time, zero delays.\n\n\
+                       Forbidden:\n- Do not call anyone a reckless driver or liar.\n\
+                       - Do not use the network.";
+        // Denied, the wording is still repeated; the copy's list holds for
+        // the copy alone.
+        let summary = b"# Summary\n\nNo driver at fault was named.\nNobody was called a liar.\n";
+        let problems = checked_reading(
+            &[("in/rules.md", rules)],
+            request,
+            &[
+                ("out/summary.md", summary),
+                ("out/log.csv", b"id,note\n1,always on time\n"),
+                (
+                    "out/fixed_copy.md",
+                    b"Deliveries keep to schedule.\nWe promise zero delays.\n",
+                ),
+            ],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/summary.md` repeats wording the task forbids: `driver at fault` (line 3), `liar` (line 4); leave it out even to say it was avoided, and name it by its kind.",
+                "`out/fixed_copy.md` repeats wording the task forbids: `zero delays` (line 2); leave it out even to say it was avoided, and name it by its kind.",
+            ]
+        );
+    }
+
+    #[test]
+    fn rules_naming_no_wording_rules_for_others_and_wording_a_source_holds_forbid_nothing() {
+        let rules = "Agents must not state:\n- refund guaranteed\n\n\
+                     Do not include:\n- phone numbers\n\n\
+                     Do not say anything about:\n- pricing\n";
+        let chat = "Caller: you said refund guaranteed and called me a liar.\n";
+        let request = "Read in/rules.md and in/chat.md.\n\n\
+                       Create:\n- out/rewrite.md\n- out/rationale.md\n- out/audit.json\n\n\
+                       Requirements for rewrite.md:\n\
+                       - Do not include the phrases: best price ever, risk-free.\n\n\
+                       Requirements for rationale.md:\n- Explain why each phrase was removed.\n\n\
+                       Forbidden:\n- Do not call anyone a liar.\n\
+                       - Do not include: emails, phone numbers.\n\
+                       - Do not call anyone names.\n- Do not write the audit as CSV.";
+        let audit = br#"{"quote": "you said refund guaranteed and called me a liar.",
+                        "note": "phone numbers and pricing left out"}"#;
+        let problems = checked_reading(
+            &[("in/rules.md", rules), ("in/chat.md", chat)],
+            request,
+            &[
+                (
+                    "out/rewrite.md",
+                    b"The risk_free_returns flag stays; prices are fair.\n",
+                ),
+                (
+                    "out/rationale.md",
+                    b"Removed \"best price ever\" and \"risk-free\".\n",
+                ),
+                ("out/audit.json", audit),
+            ],
+        );
+        assert_eq!(problems, Vec::<String>::new());
+    }
+
+    /// A schedule whose `policy_basis` column holds codes alone, and notes
+    /// that give a flag's code in backticks, as inputs of a review.
+    const SCHEDULE: [(&str, &str); 2] = [
+        (
+            "in/terms.csv",
+            "term,risk_level,policy_basis\nfree trial,high,RULE-1\nno fees,medium,RULE-2\n\
+             trial_flag,low,RULE-3\n",
+        ),
+        (
+            "in/policy.md",
+            "# Rules\n\nA name match is recorded only as `needs_manual_check`.\n",
+        ),
+    ];
+
+    #[test]
+    fn a_note_added_to_codes_an_input_holds_bare_is_reported_with_where_they_come_from() {
+        let request = "Read in/terms.csv and in/policy.md.\n\n\
+                       Create:\n- out/report.csv\n- out/review.json";
+        let report = b"term,policy_basis\nfree trial,RULE-1; RULE-2 (sales asked to keep it)\n\
+                       no fees,RULE-2\ntrial_flag,RULE-3 benign label only\n";
+        let review = br#"[{"id": "A-1", "review_flags": ["needs_manual_check: a name match in an old list"]},
+                          {"id": "A-2", "review_flags": ["needs_manual_check"]}]"#;
+        let problems = checked_reading(
+            &SCHEDULE,
+            request,
+            &[("out/report.csv", report), ("out/review.json", review)],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/report.csv` has `policy_basis` values that add a note to a code: `RULE-1; RULE-2 (sales asked to keep it)` (line 2), `RULE-3 benign label only` (line 4); `in/terms.csv` holds codes such as `RULE-1` bare in its `policy_basis` column, so write the codes alone and move any note to a free-text field.",
+                "`out/review.json` has `review_flags` values that add a note to a code: `needs_manual_check: a name match in an o...`; `in/policy.md` gives codes such as `needs_manual_check` bare, so write the codes alone and move any note to a free-text field.",
+            ]
+        );
+    }
+
+    #[test]
+    fn codes_alone_or_joined_and_notes_in_fields_not_named_for_codes_pass() {
+        let request = "Read in/terms.csv and in/policy.md.\n\n\
+                       Create:\n- out/report.csv\n- out/review.json";
+        // A term in its own words, codes joined, a note in a column of its
+        // own; a markdown name in a status or summary, which may be prose.
+        let report = b"term,policy_basis,basis_note\nfree trial (headline),RULE-1; RULE-2,RULE-1 since sales asked\n\
+                       no fees,RULE-2 and OTHER-9,\ntrial_flag,RULE-3,\n";
+        let review = br#"[{"id": "A-1", "status": "needs_manual_check: see the log",
+                           "summary": "RULE-1 applies to the trial", "policy_basis": "RULE-1",
+                           "review_flags": ["needs_manual_check", "other_flag"]}]"#;
+        let problems = checked_reading(
+            &SCHEDULE,
+            request,
+            &[("out/report.csv", report), ("out/review.json", review)],
+        );
+        assert_eq!(problems, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_field_to_leave_empty_in_records_a_code_marks_is_reported_where_filled() {
+        let request = "Create:\n\n1. `out/rulings.json`\n   - A JSON array, one item per case.\n\
+                       \x20  - `decision`: exactly `granted`, `refused`, or `not_enough_info`\n\
+                       \x20  - `rule_file`: path under `rules/`, or empty/null for real not enough info\n\
+                       2. `out/rulings.csv`\n   - Leave `note` blank when the decision is `refused`.";
+        let rulings = br#"[{"case_id": "K-1", "decision": "granted", "rule_file": "rules/a.md"},
+                           {"case_id": "K-2", "decision": "not_enough_info", "rule_file": "rules/b.md"},
+                           {"case_id": "K-3", "decision": "not_enough_info", "rule_file": null}]"#;
+        let table =
+            b"case_id,decision,note\nK-1,granted,\nK-2,refused,the file was late\nK-3,refused,\n";
+        assert_eq!(
+            checked(
+                request,
+                &[("out/rulings.json", rulings), ("out/rulings.csv", table)]
+            ),
+            [
+                "`out/rulings.json` fills `rule_file` in records marked `not_enough_info`: `rules/b.md` (case_id `K-2`); the request says empty/null for real not enough info, so leave it empty there.",
+                "`out/rulings.csv` fills `note` in records marked `refused`: `the file was late` (line 3); the request says blank when the decision is `refused`, so leave it empty there.",
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_for_a_case_no_code_names_or_as_one_choice_of_two_asks_nothing() {
+        let request = "Write out/summary.json as a JSON array.\n\
+                       - `status`: exactly `open`, `closed` or `on_hold`\n\
+                       - `top_severity`: the highest open severity; use null if a project has no open items.\n\
+                       - `reason`: why it is held, or empty unless the status is `on_hold`.\n\
+                       - `owner_team`: leave empty or name a related team.";
+        let summary = br#"[{"project": "p1", "status": "closed", "top_severity": "high",
+                            "reason": "done early", "owner_team": "ops"}]"#;
+        assert_eq!(
+            checked(request, &[("out/summary.json", summary)]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A reading list naming two notes by their paths from `in/`, with those
+    /// notes and two files it does not name.
+    const NOTES: [(&str, &str); 5] = [
+        (
+            "in/index.md",
+            "# Reading list\n\nThe pilot is covered in notes/alpha.md and notes/beta.md.\n",
+        ),
+        (
+            "in/notes/alpha.md",
+            "# Alpha\n\nThe pilot ran for six weeks.\n",
+        ),
+        (
+            "in/notes/beta.md",
+            "# Beta\n\nThe pilot cost less than planned.\n",
+        ),
+        ("in/notes/gamma.md", "# Gamma\n\nNo figures yet.\n"),
+        (
+            "in/notes/two words.md",
+            "# Two words\n\nA name with a space.\n",
+        ),
+    ];
+
+    #[test]
+    fn a_path_given_more_text_or_written_otherwise_than_the_inputs_write_it_is_reported() {
+        let request = "Read in/index.md and the notes it lists.\n\n\
+                       Create:\n- out/picks.json\n- out/links.csv";
+        let picks = br#"[{"id": "P-1", "chosen_source": "in/notes/alpha.md (A-1, A-2)"},
+                         {"id": "P-2", "chosen_source": "notes/beta.md"}]"#;
+        let links = b"id,expected_file\nL-1,in/notes/beta.md\nL-2,notes/alpha.md\n";
+        let problems = checked_reading(
+            &NOTES,
+            request,
+            &[("out/picks.json", picks), ("out/links.csv", links)],
+        );
+        assert_eq!(
+            problems,
+            [
+                "`out/picks.json` has `chosen_source` values that add text to an input's path: `in/notes/alpha.md (A-1, A-2)`; write the path alone, as `notes/alpha.md`, or as `notes/alpha.md#part` for a part of it, and move the rest to a free-text field.",
+                // `in/notes/beta.md` is the file's own path, so it stands.
+            ]
+        );
+    }
+
+    #[test]
+    fn paths_alone_with_a_part_or_joined_and_text_in_fields_naming_no_file_pass() {
+        let request = "Read in/index.md and the notes it lists.\n\n\
+                       Create:\n- out/picks.json\n- out/links.csv";
+        // A part after `#` or `:`, paths joined or listed, a file no input
+        // names, a name with a space, a label, an output, and text beside a
+        // path in a note or a reference.
+        let picks = br#"[{"id": "P-1", "chosen_source": "notes/alpha.md#A-1|A-2",
+                          "source_files": ["notes/alpha.md", "./notes/beta.md"],
+                          "note": "notes/alpha.md (A-1, A-2)", "evidence_ref": "notes/beta.md (cost)"},
+                         {"id": "P-2", "chosen_source": "notes/beta.md:3",
+                          "source_path": "in/notes/gamma.md", "file": "in/notes/two words.md",
+                          "path": "the alpha note"},
+                         {"id": "P-3", "chosen_source": "notes/alpha.md; notes/beta.md",
+                          "output_file": "out/links.csv (draft)"}]"#;
+        let links = b"id,expected_file,sources\n\
+                      L-1,notes/beta.md,notes/alpha.md and notes/beta.md\n\
+                      L-2,notes/alpha.md#S-1,\"notes/alpha.md, notes/beta.md\"\n";
+        let problems = checked_reading(
+            &NOTES,
+            request,
+            &[("out/picks.json", picks), ("out/links.csv", links)],
+        );
+        assert_eq!(problems, Vec::<String>::new());
+    }
+
+    /// A register giving three hazards ids, and notes giving none.
+    const HAZARDS: [(&str, &str); 2] = [
+        (
+            "in/hazards.csv",
+            "hazard_id,level,summary\nHZ-ROOF,high,Loose roof panels\n\
+             HZ-WIRE,medium,Exposed wiring\nHZ-EXIT,high,Blocked fire exit\n",
+        ),
+        (
+            "in/walk.md",
+            "# Site walk\n\nThe roof and the exit were flagged.\n",
+        ),
+    ];
+
+    /// Findings that cite each hazard once by its id, under ids of their own.
+    const FINDINGS: [(&str, &[u8]); 2] = [
+        (
+            "out/findings.csv",
+            b"finding_id,level,evidence_ref\nF-ROOF,high,in/hazards.csv#HZ-ROOF\n\
+              F-WIRE,medium,in/hazards.csv#HZ-WIRE\nF-EXIT,high,in/hazards.csv#HZ-EXIT; in/walk.md\n",
+        ),
+        (
+            "out/summary.json",
+            br#"{"findings": [{"finding_id": "F1-A", "evidence": ["hazards.csv: HZ-ROOF"]},
+                              {"finding_id": "F1-B", "evidence": ["HZ-WIRE"]},
+                              {"finding_id": "F1-C", "evidence": ["HZ-EXIT (blocked)"]}]}"#,
+        ),
+    ];
+
+    #[test]
+    fn ids_no_input_gives_are_reported_where_each_record_cites_one_input_item() {
+        let request = "Read in/hazards.csv and in/walk.md.\n\n\
+                       Create:\n- out/findings.csv\n- out/summary.json\n\n\
+                       Give each finding's finding_id, level and evidence.";
+        assert_eq!(
+            checked_reading(&HAZARDS, request, &FINDINGS),
+            [
+                "`out/findings.csv` has `finding_id` values no input gives: `F-ROOF` (line 2), `F-WIRE` (line 3), `F-EXIT` (line 4); each record cites one item of `in/hazards.csv` by its id, as `HZ-ROOF`, so refer to items by the ids the inputs give them.",
+                "`out/summary.json` has `finding_id` values no input gives: `F1-A`, `F1-B`, `F1-C`; each record cites one item of `in/hazards.csv` by its id, as `HZ-ROOF`, so refer to items by the ids the inputs give them.",
+            ]
+        );
+    }
+
+    #[test]
+    fn input_ids_mixed_or_linked_ids_and_ids_not_one_per_input_item_pass() {
+        let request = "Read in/hazards.csv and in/walk.md.\n\n\
+                       Create:\n- out/used.csv\n- out/mixed.csv\n- out/linked.json\n- out/partial.json\n\n\
+                       Give each finding's finding_id and evidence_ref, and the run_id.";
+        // The inputs' ids, one of them among new ones, new ones beside the
+        // inputs' in a field for ids, findings citing two hazards or fewer
+        // than all, one run, and checks the request does not ask for.
+        let used = b"finding_id,evidence_ref\nHZ-ROOF,HZ-ROOF\nHZ-WIRE,HZ-WIRE\nHZ-EXIT,HZ-EXIT\n";
+        let mixed = b"finding_id,evidence_ref\nHZ-ROOF,HZ-ROOF\nF-WIRE,HZ-WIRE\nF-EXIT,HZ-EXIT\n";
+        let linked = br#"[{"finding_id": "F-1", "hazard_id": "HZ-ROOF", "evidence_ref": "HZ-ROOF"},
+                          {"finding_id": "F-2", "hazard_id": "HZ-WIRE", "evidence_ref": "HZ-WIRE"},
+                          {"finding_id": "F-3", "hazard_id": "HZ-EXIT", "evidence_ref": "HZ-EXIT"}]"#;
+        let partial = br#"{"run_id": "RUN-7",
+                           "findings": [{"finding_id": "F-1", "evidence_ref": "HZ-ROOF and HZ-EXIT"},
+                                        {"finding_id": "F-2", "evidence_ref": "HZ-WIRE"}],
+                           "checks": [{"check_id": "C-1", "evidence_ref": "HZ-ROOF"},
+                                      {"check_id": "C-2", "evidence_ref": "HZ-WIRE"},
+                                      {"check_id": "C-3", "evidence_ref": "HZ-EXIT"}]}"#;
+        let problems = checked_reading(
+            &HAZARDS,
+            request,
+            &[
+                ("out/used.csv", used),
+                ("out/mixed.csv", mixed),
+                ("out/linked.json", linked),
+                ("out/partial.json", partial),
+            ],
+        );
+        assert_eq!(problems, Vec::<String>::new());
+    }
+
+    #[test]
+    fn ids_a_request_asks_to_be_made_are_not_held_to_the_inputs() {
+        for asked in [
+            "Assign each finding an id of its own.",
+            "Use ids like F-1 for findings.",
+        ] {
+            let request = format!(
+                "Read in/hazards.csv and in/walk.md.\n\n\
+                 Create:\n- out/findings.csv\n- out/summary.json\n\n\
+                 Give each finding's finding_id, level and evidence. {asked}"
+            );
+            assert_eq!(
+                checked_reading(&HAZARDS, &request, &FINDINGS),
+                Vec::<String>::new()
+            );
+        }
+    }
+
+    #[test]
+    fn named_words_leave_out_what_a_request_names_but_does_not_ask_for() {
+        let request = "Build the importer in src/importer.py and write its summary \
+                       to reports/summary.md, not reports/old.md.\n\
+                       Do not create reports/draft.md yet. reports/extra.md is optional.\n\
+                       Optionally, add a test in tests/test_importer.py. \
+                       There is no need for docs/usage.md.\n\
+                       Write each reply to replies/ (e.g. replies/002.txt).\n\
+                       Delete cache/old.db once the import works.\n\
+                       Read:\n- data/input.csv\n\n\
+                       Outputs:\n- reports/totals.csv\n- Later:\n  - reports/later.md\n\n\
+                       ```\nTraceback (most recent call last):\n  \
+                       File \"/usr/lib/python3/dist-packages/x.py\", line 3\n```\n\
+                       diff --git a/src/importer.py b/src/importer.py\n\
+                       --- a/src/importer.py\n\
+                       +++ b/src/importer.py\n\
+                       @@ -1,2 +1,3 @@\n \
+                       import csv\n\
+                       +rows = open(\"fixtures/sample.csv\")\n\n\
+                       Then save the log to logs/run.log.";
+        assert_eq!(
+            named_words(request).collect::<Vec<_>>(),
+            [
+                "src/importer.py",
+                "reports/summary.md",
+                "replies/",
+                "reports/totals.csv",
+                "logs/run.log",
+            ]
+        );
+    }
+
+    #[test]
+    fn named_words_keep_under_out_only_what_the_contract_asks_for() {
+        // The contract's own requests on files not to make, or to make later,
+        // each sentence asking for some; named_words may leave out more.
+        let requests = [
+            "Create out/state.json now.\n\n\
+             Do not create these yet:\n- out/final.json\n- out/ledger.csv\n\n\
+             Never write these files:\n- out/secret.json\n\n\
+             Don't create the following yet:\n1. out/later.json\n\n\
+             Outputs (create later, not now):\n- out/final2.json\n\n\
+             Create these in round 2, not now:\n- out/round2.json\n\n\
+             Outputs:\n- out/report.md",
+            "Create out/a.json. Don't make out/b.json yet.\n\
+             Do not generate out/c.md in this round. Never produce out/d.csv.\n\
+             Do not save anything to out/e.json, and do not overwrite out/f.json.\n\
+             Finish the run without creating out/g.json.\n\
+             Write out/x.csv without a BOM.\n\n\
+             Do not produce these files:\n- out/h.json\n- out/i.csv\n\n\
+             Outputs:\n- out/y.json\n\n\
+             **Do not create these yet:**\n- out/j.json\n\n\
+             Create:\n- out/z.json\n1. Do not create these yet:\n   - out/k.json\n\
+             - **Not yet** (round 2):\n  - out/l.json\n- out/w.json",
+            "Create out/a.json but not out/b.json, and out/c.json, not out/d.json.\n\
+             Write out/e.json only; no out/f.json.\n\
+             It is forbidden to write out/g.json. Dont create out/h.json.\n\
+             Do not, under any circumstances, write out/i.json.\n\
+             Do not ever write out/j.json. Do not try to create out/k.json.\n\
+             Finish while avoiding writing out/l.json. No need to create out/m.json.\n\
+             Do not forget to write out/n.json.\n\n\
+             Create:\n- out/o.json\n- Later:\n  - out/p.json\n- out/q.json\n\n\
+             Create these later:\n- out/r.json\n\n\
+             Write out/s.md, explaining:\n~~~\nWrite out/t.json\n~~~",
+            "Write out/a.json. Optionally, write out/b.json too.\n\
+             The report must not be written to out/c.txt; print it.\n\
+             The log must never be written to out/d.txt.\n\
+             Generate out/e.json but skip out/f.json.\n\
+             There is no need to write a out/g.md. There is no need for out/h.md.\n\
+             Write out/i.json.\n\n\
+             Optionally:\n- out/j.json\n\nOutputs:\n- out/k.json",
+        ];
+        for request in requests {
+            let contract = from_request(request, Path::new("/workspace"));
+            let asked = paths(&contract);
+            let unasked: Vec<&str> = named_words(request)
+                .filter(|word| word.starts_with("out/") && !asked.contains(word))
+                .collect();
+            assert_eq!(unasked, Vec::<&str>::new(), "{request}");
+        }
+    }
+
+    #[test]
+    fn a_contract_covers_each_spelling_of_a_file_it_asks_for() {
+        let dir = Scratch::new("contract-covers");
+        let contract = from_request("Write out/a.json and out/b.csv.", &dir);
+        let whole = format!("{}/out/a.json", dir.display()).replace('\\', "/");
+        for word in ["out/a.json", "./out/a.json", whole.as_str()] {
+            assert!(contract.covers(word, &dir), "{word}");
+        }
+        for word in ["out/c.json", "notes/a.json"] {
+            assert!(!contract.covers(word, &dir), "{word}");
+        }
+    }
+}

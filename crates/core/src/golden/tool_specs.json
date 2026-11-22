@@ -1,0 +1,1776 @@
+[
+  {
+    "function": {
+      "description": "Read a text file, a document (PDF, Office, EPUB) or an image; one too big to send is scaled down. Paths are relative to the workspace. Each line is shown as `N|text`, N being its line number; the `N|` is not part of the file. A long file comes a page at a time, and the page ends with the offset to continue from. A Jupyter notebook (.ipynb) reads as numbered cells with short outputs, a document as its text with a heading for each page, sheet or slide, and N counts the lines of that view. Leave limit out to get a whole page (about 7k chars). For several files or several regions of one file, make the read_file calls in one reply, they run at once.",
+      "name": "read_file",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "description": "How many lines to show at most.",
+            "type": "integer"
+          },
+          "offset": {
+            "description": "The line to start at, counting from 1.",
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "List one folder's entries, one a line, not what its subfolders hold. Folders end with a slash. To find files by name across the tree, use search with mode files and a glob.",
+      "name": "list_dir",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "The folder, relative to the workspace; the workspace root if left out.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Regex search (Rust syntax) of file contents under a folder, skipping .gitignore'd files. Mode content (default) shows `12: text` matches with `13- text` context; files lists matching files, newest first; count gives matches per file. Mode files with no pattern lists the files a glob or type picks. Case-insensitive unless case_sensitive. Several patterns or folders: several search calls in one reply, run at once.",
+      "name": "search",
+      "parameters": {
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "context": {
+            "description": "Lines shown either side of each match, up to 5.",
+            "type": "integer"
+          },
+          "glob": {
+            "description": "Only paths under `path` matching this, e.g. `*.rs` or `src/**/*.{ts,tsx}`; a leading `!` leaves them out instead.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Results per page, 100 unless set.",
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "content",
+              "files",
+              "count"
+            ],
+            "type": "string"
+          },
+          "offset": {
+            "description": "Results to skip, to reach the next page.",
+            "type": "integer"
+          },
+          "path": {
+            "description": "Folder or file to search. Defaults to the workspace root.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "A regex. One that does not parse, or finds nothing, is tried as plain text.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Only files of this type, such as rust, py, ts or md, or a bare extension.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Create or overwrite a text file in the project folder. Parent folders are created. A file that exists keeps its line endings and byte order mark. Overwriting needs the whole file read first with read_file in an earlier reply, or written with write_file, and not changed since; to change part of a file, use edit_file.",
+      "name": "write_file",
+      "parameters": {
+        "properties": {
+          "content": {
+            "description": "The whole new text of the file; none of the old text is kept.",
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Replace `old` with `new` in a file you read with read_file in an earlier reply, or wrote with write_file, if it has not changed since; search hits and command output do not count as reads. `old` must match exactly once, unless replace_all is set to change every match. Line endings, trailing spaces, indentation, curly quotes and invisible characters need not match; the file keeps its own. For several changes to one file, pass `edits` instead: they are made in order, and if one fails none is made. A failed edit changes nothing and says why; a successful one need not be read back.",
+      "name": "edit_file",
+      "parameters": {
+        "properties": {
+          "edits": {
+            "description": "Several replacements, instead of `old` and `new`.",
+            "items": {
+              "properties": {
+                "new": {
+                  "type": "string"
+                },
+                "old": {
+                  "type": "string"
+                },
+                "replace_all": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "old",
+                "new"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "replace_all": {
+            "description": "Change every match of `old`, not just one.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Add, delete, update and move files with one patch, approved as one change. The patch runs from `*** Begin Patch` to `*** End Patch`. Each file in it starts with `*** Add File: <path>` followed by its lines, each starting with +; `*** Delete File: <path>`; or `*** Update File: <path>`, optionally followed by `*** Move to: <new path>`, then its hunks. A hunk starts with an `@@` line, which may name the function or class it is in, then lines starting with a space (kept), - (removed) or + (added), with about three kept lines around each change. Paths are relative to the project folder. Update or delete only files you have read. If any hunk does not apply, no file is changed. A patch that applied need not be read back.",
+      "name": "apply_patch",
+      "parameters": {
+        "properties": {
+          "patch": {
+            "description": "The whole patch, from `*** Begin Patch` to `*** End Patch`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "patch"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Run a bash command in the project folder. Each call is a fresh shell: chain dependent steps with && and pass workdir instead of cd. Returns stdout, then `[stderr]`, then `[exit code N]` unless 0. Long output keeps its start and end and names a file read_file can page, so do not pipe through tail. No keyboard: pass --yes or pipe answers in. For a server or watcher, pass background: true. Independent commands, such as two test suites, go in one reply as separate calls; they run in your order and each reports its own exit code.",
+      "name": "run_command",
+      "parameters": {
+        "properties": {
+          "background": {
+            "description": "Leave it running and return a job number at once; a notice comes when it exits. read_job reads its output and stop_job ends it.",
+            "type": "boolean"
+          },
+          "command": {
+            "description": "The command line; it runs as one script.",
+            "type": "string"
+          },
+          "notify_on": {
+            "description": "With background: also a notice when a line of output contains one of these, such as \"ready\" or \"error\"; at most one every 15 s.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timeout": {
+            "description": "Seconds to wait for it to finish, 1 to 1800; 120 if left out. Give a slow build, install or test suite longer.",
+            "type": "number"
+          },
+          "tty": {
+            "description": "Run it in the background on a pseudo-terminal, so you can answer it with send_job. Only for a program that must be answered at a keyboard and has no flag to skip the question.",
+            "type": "boolean"
+          },
+          "unsandboxed": {
+            "description": "Run it outside the sandbox. A command ran in the sandbox only when its result has a line starting `(ran sandboxed`; use this only after such a run of it failed for want of the network or of writing outside the project, or when an error says it cannot be sandboxed. It needs the user's approval.",
+            "type": "boolean"
+          },
+          "workdir": {
+            "description": "A folder inside the project to run it in instead, relative to the project folder or absolute.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Read what a background job has printed so far, and whether it is still running.",
+      "name": "read_job",
+      "parameters": {
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "limit": {
+            "description": "How many lines to read from there.",
+            "type": "integer"
+          },
+          "offset": {
+            "description": "How many lines to skip, counting from the oldest line still kept.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "List the background jobs this conversation and its helpers started: each one's number, command, whether it still runs or how it ended, how long it ran and how much it printed. Finished jobs are cleared after a while.",
+      "name": "list_jobs",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Stop a background job, killing the processes it started if it still runs. No exit notice follows; read_job still shows its log for a while.",
+      "name": "stop_job",
+      "parameters": {
+        "properties": {
+          "id": {
+            "description": "The job's number, from list_jobs or the call that started it.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Type into a tty job and return what it prints next. Never for passwords.",
+      "name": "send_job",
+      "parameters": {
+        "properties": {
+          "job": {
+            "type": "integer"
+          },
+          "keys": {
+            "description": "Pressed after text, in order.",
+            "items": {
+              "enum": [
+                "enter",
+                "tab",
+                "esc",
+                "up",
+                "down",
+                "ctrl-c",
+                "ctrl-d"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "text": {
+            "description": "Typed first, as it is.",
+            "type": "string"
+          },
+          "until": {
+            "description": "Return once the job prints this, rather than once it goes quiet.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Pause before continuing: for a number of seconds, or until a background job prints something. Use it to let a server come up before calling it; waiting for a job's `until` ends as soon as it prints. Only what the job prints after the wait begins counts; read_job shows what it printed before. If you have wake_me, use it instead of a plain pause over 30 seconds.",
+      "name": "wait",
+      "parameters": {
+        "properties": {
+          "job": {
+            "description": "Wait for this job to print `until`, or to exit.",
+            "type": "integer"
+          },
+          "seconds": {
+            "description": "How long to wait, 10 unless given and 120 at most. Also the limit when waiting for output.",
+            "type": "number"
+          },
+          "until": {
+            "description": "Text to watch for in what the job prints from now on, such as `ready` or `listening`.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "End your turn and have this session woken later, such as to look at CI or a deploy again in 20 minutes. Never wake early to poll for something that sends a notice when it is done. Keep a fallback wake-up, for a notice that may not come, at 20 minutes or more. A session has one wake-up: a newer one replaces it.",
+      "name": "wake_me",
+      "parameters": {
+        "properties": {
+          "prompt": {
+            "description": "What to do on waking; defaults to carrying on.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Shown to the user.",
+            "type": "string"
+          },
+          "seconds": {
+            "description": "60 to 86400.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seconds",
+          "reason"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Run a prompt later on this computer, each time in a fresh session with nobody there to answer: every N minutes, daily at a time, or once at a date and time or in N minutes. When a run ends, its final answer is posted to the chat apps the user has connected, so to have something sent there regularly, schedule the prompt that writes it; runs happen only while Vythea's window, an open terminal or `vythea serve` is running. Also lists the schedules and removes one you added. Adding or removing waits for the user's yes.",
+      "name": "schedule",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "add",
+              "list",
+              "remove"
+            ],
+            "type": "string"
+          },
+          "at": {
+            "description": "For add: run once at this local date and time, YYYY-MM-DD HH:MM.",
+            "type": "string"
+          },
+          "check": {
+            "description": "For add: a command run first each time; when its output matches last time's, the run is skipped. Print only what matters (e.g. `curl -s URL | jq .price`), never a clock.",
+            "type": "string"
+          },
+          "daily_at": {
+            "description": "For add: HH:MM each day, in this computer's time zone.",
+            "type": "string"
+          },
+          "every_minutes": {
+            "description": "For add: run every N minutes.",
+            "type": "integer"
+          },
+          "id": {
+            "description": "For remove: the schedule's number from list.",
+            "type": "integer"
+          },
+          "in_minutes": {
+            "description": "For add: run once, N minutes from now.",
+            "type": "integer"
+          },
+          "mode": {
+            "description": "For add: what each run may do unasked; what would ask is refused. Leave it default unless the user asked for more.",
+            "enum": [
+              "default",
+              "accept-edits",
+              "plan",
+              "auto",
+              "bypass"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "description": "For add: a few words for the list.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "For add: what each run is told. It starts with no memory of this chat, so say everything it needs.",
+            "type": "string"
+          },
+          "quiet": {
+            "description": "For add: post a run only when it has news. Use for watches and alerts, not digests or reminders.",
+            "type": "boolean"
+          },
+          "weekdays_only": {
+            "description": "With daily_at: Monday to Friday only.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "The user's setup in Vythea, from its own settings: account, plan and credit, models and provider keys, chat apps, schedules, MCP servers and more. Says whether a key or token is set and where, never its value.",
+      "name": "vythea_info",
+      "parameters": {
+        "properties": {
+          "email": {
+            "description": "With account: add the sign-in email, only when the user asks for it.",
+            "type": "boolean"
+          },
+          "topic": {
+            "description": "all gives a line of each.",
+            "enum": [
+              "all",
+              "account",
+              "models",
+              "chat_apps",
+              "schedules",
+              "mcp",
+              "profiles",
+              "permissions",
+              "settings",
+              "usage",
+              "version",
+              "data"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Set up Vythea itself when the user asks. Telegram: telegram_token saves the bot token the user copied to the clipboard (it never passes through this chat), telegram_pair makes a six-digit code to send to the bot, and the rest switch Telegram on or off, allow tools for the paired chat, or unpair it. MCP servers: mcp_add (name and target: the command line that starts it, or its https address), mcp_remove, mcp_enable, mcp_disable. Plugins: plugin_add (target: a git URL or owner/repo), plugin_enable, plugin_disable; a plugin's servers and code stay off until the user allows them in the Plugins page. Skills: skill_enable, skill_disable. Secrets such as API keys or headers are never taken here: the user adds them in the window. Each call asks the user first.",
+      "name": "vythea_setup",
+      "parameters": {
+        "properties": {
+          "action": {
+            "description": "What to do.",
+            "enum": [
+              "telegram_token",
+              "telegram_pair",
+              "telegram_enable",
+              "telegram_disable",
+              "telegram_allow_tools",
+              "telegram_unpair",
+              "mcp_add",
+              "mcp_remove",
+              "mcp_enable",
+              "mcp_disable",
+              "plugin_add",
+              "plugin_enable",
+              "plugin_disable",
+              "skill_enable",
+              "skill_disable"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "description": "The MCP server, plugin or skill the action is about; for mcp_add, the name to give it (letters, digits, - and _).",
+            "type": "string"
+          },
+          "target": {
+            "description": "With mcp_add: the command line that starts the server, or its https address. With plugin_add: a git URL or owner/repo.",
+            "type": "string"
+          },
+          "value": {
+            "description": "With telegram_allow_tools: true lets the paired chat use tools that change things.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Ask the user one question and wait for the answer. Only for a decision that is theirs and that the request, the project and sensible defaults do not settle; never to ask whether to go ahead with work the user already asked for. Returns their answer: one of the options, or their own words; if nobody can answer it says so, and you decide.",
+      "name": "ask_user",
+      "parameters": {
+        "properties": {
+          "options": {
+            "description": "Optional answers to pick from, two to four short ones. Put the one you recommend first, with \"(Recommended)\" after it. Leave them out when the answer is open.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "question": {
+            "description": "One short question, with the context needed to answer it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Use only in plan mode. Put your finished plan to the user for approval, written in markdown. If they approve, plan mode turns off and you carry the plan out straight away; if not, keep planning. Use it once the plan is ready, instead of asking whether to go ahead.",
+      "name": "exit_plan",
+      "parameters": {
+        "properties": {
+          "plan": {
+            "description": "The plan in markdown, short enough to review: the goal, the changes in order, how they will be checked, and any assumptions you made. Settle the choices the work needs, so approving the plan approves them.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Your plan as a checklist, for work of three or more steps; skip it for quick tasks. Send the whole list each time, keep one item doing, and mark one done only once it is checked, never on intent. Do not paste the list into your reply.",
+      "name": "todo",
+      "parameters": {
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "pending",
+                    "doing",
+                    "done"
+                  ],
+                  "type": "string"
+                },
+                "text": {
+                  "description": "One concrete step that can be checked.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Read recent messages in the chat this conversation is happening in, including those not addressed to you. Oldest first, one per line: time, name, text.",
+      "name": "read_chat",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "description": "How many of the latest messages, 1 to 500. Defaults to 100.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Send a file to the chat app this session is talking in: one in the project, or one in Vythea's media folder, such as a file the user sent. A picture arrives as a photo, MP3 or M4A audio as a track, anything else as a document. Telegram takes up to 50 MB from a bot (10 MB as a photo), Discord up to 20 MB. A picture, speech or video made this turn is sent after the reply without this.",
+      "name": "send_file",
+      "parameters": {
+        "properties": {
+          "caption": {
+            "description": "A line to show with it.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The file, relative to the workspace, or a path in Vythea's media folder.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Post a message now through the chat apps the user connected to Vythea, where scheduled runs report: to all of them, or to the one in `to`. Vythea sends it with the connections and keys it holds, so use this rather than a webhook, curl or a script of your own. Each message waits for the user's yes.",
+      "name": "notify",
+      "parameters": {
+        "properties": {
+          "text": {
+            "description": "The message as it should arrive, at most 1,900 characters.",
+            "type": "string"
+          },
+          "to": {
+            "description": "One of the places set up; leave out for all of them.",
+            "enum": [
+              "Discord (webhook)",
+              "Discord (bot DM)",
+              "Slack",
+              "Telegram",
+              "email"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "List the user's earlier Vythea sessions: id, title, when they were last used, how many messages, and which project folder. It returns no conversation text.",
+      "name": "list_sessions",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "description": "How many to list, newest first. Default 15.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Keep or correct notes shown at the start of every session. target \"user\": about the user; \"memory\": your own notes; \"project\": facts about the attached project, such as how to build and test it. action \"add\" adds content; \"replace\" and \"remove\" act on the entry containing old_text. Budgets are small: when full, replace or remove before adding. Use operations for several changes in one call.",
+      "name": "memory",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "add",
+              "replace",
+              "remove"
+            ],
+            "type": "string"
+          },
+          "content": {
+            "description": "The entry to keep, or what the entry becomes.",
+            "type": "string"
+          },
+          "old_text": {
+            "description": "Part of the entry to replace or remove, unique to it.",
+            "type": "string"
+          },
+          "operations": {
+            "description": "Several changes to the target, instead of action.",
+            "items": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "add",
+                    "replace",
+                    "remove"
+                  ],
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "old_text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "type": "object"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "target": {
+            "enum": [
+              "user",
+              "memory",
+              "project"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Load a skill listed in your instructions: instructions for a kind of task. It comes with the folder it lives in and the files beside it, such as scripts to run and references to read. Long text comes in pages.",
+      "name": "skill",
+      "parameters": {
+        "properties": {
+          "file": {
+            "description": "A file in the skill's folder, as the skill lists it, such as reference/forms.md.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The skill's name as listed, or \"?\" to list every skill that is switched on.",
+            "type": "string"
+          },
+          "offset": {
+            "description": "Where to read on from, as the previous page says.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Save a way of working as a skill, so later sessions can load it, or fix one you saved that turned out wrong. Save only work likely to recur, and only steps you saw work or the user gave: short, ordered, each saying how to tell it worked. Leave out task results, one-off details, failed attempts, and claims that a tool does not work; save the fix that did. A skill you create starts switched off: it is not offered to you, and cannot be loaded, until the user switches it on in Skills. action create takes name, description and body (the instructions, in Markdown, at most 20,000 bytes). action patch replaces the exact text old with new in a skill's body, or its description with field set to description; old must appear exactly once. action undo puts back a skill as it was before your last patch; undo again to redo it. action archive puts a skill away. Only skills you created can be changed; the user's own, installed and project skills are refused.",
+      "name": "skill_manage",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "create",
+              "patch",
+              "undo",
+              "archive"
+            ],
+            "type": "string"
+          },
+          "body": {
+            "description": "For create: the instructions, in Markdown.",
+            "type": "string"
+          },
+          "description": {
+            "description": "For create: one line that starts with when to use the skill.",
+            "type": "string"
+          },
+          "field": {
+            "description": "For patch: where old is. The body unless said.",
+            "enum": [
+              "body",
+              "description"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "description": "The skill's name: a few words, such as release-checklist.",
+            "type": "string"
+          },
+          "new": {
+            "description": "For patch: what replaces it.",
+            "type": "string"
+          },
+          "old": {
+            "description": "For patch: the exact text to replace.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Search what was said in the user's earlier Vythea sessions, ignoring case. A match holds every word of the query (\"quoted words\" stay together), or when nothing does, some of them; matches on rarer words come first. Titles and tool call arguments are searched too; the current session is left out unless named as session, which searches that session alone. Each match gives the session's id, title and age and the message's #. To read the messages around a match, call again with session and around. Use it when the user refers to something from an earlier conversation, or when an earlier session may already hold the answer.",
+      "name": "search_sessions",
+      "parameters": {
+        "properties": {
+          "after": {
+            "description": "Only sessions last used on or after this date, such as 2026-09-01, or this many days ago, such as 7d.",
+            "type": "string"
+          },
+          "around": {
+            "description": "With session: the # of the message to read, with the three either side of it. Default 0.",
+            "type": "integer"
+          },
+          "before": {
+            "description": "Only sessions last used before this date, or this many days ago.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "How many matches at most. Default 20.",
+            "type": "integer"
+          },
+          "query": {
+            "description": "The words to find. With session and around, the words to center long messages on.",
+            "type": "string"
+          },
+          "session": {
+            "description": "Search this session alone, the current one too; with around, or with no query, read its messages around one message instead.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Fetch a web page and return its text: HTML is reduced to readable markdown with its links as full addresses and its forms' fields (hidden ones too), plain text and JSON come back as they are, and a PDF is saved as a file. For a fact that may have changed since your training, such as a price, a latest release, a schedule or news, look it up rather than answer from training; if you cannot, say your answer may be out of date.",
+      "name": "web_fetch",
+      "parameters": {
+        "properties": {
+          "find": {
+            "description": "Words to look for in the page's text; each match comes back with its heading and the lines after it.",
+            "type": "string"
+          },
+          "fresh": {
+            "description": "Fetch it again even if it was read in the last 15 minutes, for a page that has changed since.",
+            "type": "boolean"
+          },
+          "from": {
+            "description": "The line to carry on from when the page was cut.",
+            "type": "integer"
+          },
+          "url": {
+            "description": "The full address, starting with https:// or http://.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Make an image from a description on Vythea's hosted image models, and save it as a file. It is paid from the user's Vythea credit, a few cents an image, so use it only when the user asks for an image.",
+      "name": "make_image",
+      "parameters": {
+        "properties": {
+          "model": {
+            "description": "A hosted image model's id. Left out, the one the user picked, or the cheapest working.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "What the image should show, in detail.",
+            "type": "string"
+          },
+          "size": {
+            "description": "Width x height in pixels, such as 1024x1024 or 1536x1024. Left out, the model's own.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Change pictures as a description says -- edit one, combine several, or redraw only where a mask marks -- and save the result as a file. It goes to the chat's own gateway: on Vythea's hosted models it is paid from the user's credit, a few cents an image. Use it only when the user asks for a picture to be changed.",
+      "name": "edit_image",
+      "parameters": {
+        "properties": {
+          "images": {
+            "description": "The pictures to edit, relative to the workspace, or a path in Vythea's media folder as an earlier result named it. Up to 16; the mask applies to the first.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mask": {
+            "description": "A PNG the size of the first picture whose fully transparent parts are the only ones redrawn. Left out, the model decides.",
+            "type": "string"
+          },
+          "model": {
+            "description": "An image model that can edit. Left out, the one the user picked, or the gateway's own.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "What to change, or what to make of the pictures, in detail.",
+            "type": "string"
+          },
+          "size": {
+            "description": "Width x height in pixels, such as 1024x1024. Left out, the model's own.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "images",
+          "prompt"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Read text aloud with a hosted voice model and save the audio as a file. It is paid from the user's Vythea credit by the character, so use it only when the user asks for speech or a voice-over.",
+      "name": "speak",
+      "parameters": {
+        "properties": {
+          "model": {
+            "description": "A hosted speech model's id. Left out, the one the user picked, or the cheapest working.",
+            "type": "string"
+          },
+          "text": {
+            "description": "What to say, exactly as it should be read.",
+            "type": "string"
+          },
+          "voice": {
+            "description": "A voice the model knows, such as alloy. Left out, the model picks one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Turn the speech in an audio or video file into text, on Vythea's hosted models. Files up to 25 MB. It is paid from the user's Vythea credit by the minute of audio, so use it only when the task needs what a recording says, such as a transcript or a summary. It returns the words as plain text, without timings.",
+      "name": "transcribe",
+      "parameters": {
+        "properties": {
+          "model": {
+            "description": "A hosted transcription model's id. Left out, the one the user picked, or the cheapest working.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The file, relative to the workspace.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Make a short video from a description on Vythea's hosted video models, and save it as an MP4 file. It renders for a few minutes as a background job: the call returns the job's number at once, read_job shows how far it has got, wait waits for it, stop_job cancels it, and a notice with the file's path comes when it is saved. It is paid from the user's Vythea credit by the second of video, several cents a second, so use it only when the user asks for a video.",
+      "name": "make_video",
+      "parameters": {
+        "properties": {
+          "job": {
+            "description": "The id of a video an earlier render left unsaved: pick that one up and save it, instead of starting another.",
+            "type": "string"
+          },
+          "model": {
+            "description": "A hosted video model's id. Left out, the one the user picked, or the cheapest working.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "What the video should show, in detail.",
+            "type": "string"
+          },
+          "seconds": {
+            "description": "How long, such as 4 or 8. Each model makes only certain lengths; left out, the model's own.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Look at web pages in a real browser (Chrome, Edge or Brave) on a profile of its own, which the user can watch and step into from Vythea's window. For pages that need script, a sign-in or clicking through. Actions:\n- open: loads `url` and lists the page, one element a line with a ref such as e12 for use_page, and each frame's contents under a header naming its origin. A download is saved in the project's media/downloads folder and named in this result or the next; a name that could run gets .download added.\n- look: lists the page again. On a long page use `find` (each match with the lines after it) before `full`.\n- scroll: about a screen, or the panel holding `ref`.\n- back\n- tabs: lists them.\n- console: recent errors and log lines.\n- screenshot: the view, or the whole page with `full` (a very long page is cut and says so). The user sees it, and you see it when your model takes images.\n- pdf: saves the page as a PDF in the same folder and gives its path.\n- hover: rests the mouse on `ref`, which the page takes as a real one's and may act on, and shows what changed, as use_page does.\n- wait: until `text` shows in the page's own text, not its frames', or with `gone` has left it, then lists the page.",
+      "name": "browse",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "open",
+              "look",
+              "scroll",
+              "back",
+              "tabs",
+              "console",
+              "screenshot",
+              "pdf",
+              "hover",
+              "wait"
+            ],
+            "type": "string"
+          },
+          "direction": {
+            "description": "For scroll.",
+            "enum": [
+              "down",
+              "up"
+            ],
+            "type": "string"
+          },
+          "find": {
+            "description": "For look: search the page's text for these words.",
+            "type": "string"
+          },
+          "frame": {
+            "description": "For an element in a frame from another origin: that origin, as its header names it.",
+            "type": "string"
+          },
+          "from": {
+            "description": "For look: the line to carry on from.",
+            "type": "integer"
+          },
+          "full": {
+            "description": "For look and scroll: all the page's text, not only what can be used. For screenshot: the whole page.",
+            "type": "boolean"
+          },
+          "gone": {
+            "type": "boolean"
+          },
+          "listing": {
+            "description": "For hover: `full` lists the whole page after.",
+            "enum": [
+              "changes",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ref": {
+            "description": "For hover: the element's ref. For scroll: an element in the panel to move, or the panel.",
+            "type": "string"
+          },
+          "seconds": {
+            "description": "For wait: the most to wait, 10 unless given and 30 at most.",
+            "type": "integer"
+          },
+          "tab": {
+            "description": "For tabs: the number of the tab to switch to.",
+            "type": "integer"
+          },
+          "text": {
+            "description": "For wait: the words; case does not count.",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Act on the page open in browse, as a person would, by the refs browse lists. Actions:\n- click: an element, or a point `x`, `y` in CSS pixels of the view, sized as the latest screenshot's result says (the picture itself may be shrunk), read off a screenshot of the view, not of the whole page. A point is refused once the page changed or scrolled since, and inside a frame from another origin.\n- type: replaces the field's text (a date, time, colour or range field is set instead), all at once or with `keys` as a real key press for each character, and reads it back: if the field holds other text the result says so and `submit` (Enter after) is not pressed.\n- press: a real key press of `key`.\n- select: a dropdown's option by its text, a site's own dropdown too.\n- upload: files from the project into a file field.\n- drag: an element onto another (`to`) or a point.\n- eval: a JavaScript expression, and returns its value.\n- batch: `steps` in order in one call, each written as its own call (browse's hover, wait and scroll too), stopping at the first that fails -- a wait whose text does not come, or a field left holding other text than was typed -- and giving each step's short result.\nAn element under a frame header marked cross-origin or opaque origin also needs `frame`; each such action, and each step, is asked about on its own. Returns what changed since you last saw this tab's page listed: new lines (`>`) and gone ones (`<`) with the lines around them, or the whole page once another has loaded or when none was listed before. Names a file an action downloaded, as browse does. A question the page asks, such as \"Are you sure?\", is answered Cancel unless `confirm` is true. Fill a form with one batch ending in the click that sends it, unless a field suggests as you type or the form pays, buys, deletes or sends a message: then look at the filled form before sending. Before saying a task on the web is done, check that the page shows it done, and give the user only names, prices and addresses the pages showed, saying so when something asked for was not there.",
+      "name": "use_page",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "click",
+              "type",
+              "press",
+              "select",
+              "upload",
+              "drag",
+              "eval",
+              "batch"
+            ],
+            "type": "string"
+          },
+          "confirm": {
+            "description": "Answer OK if the page asks for confirmation.",
+            "type": "boolean"
+          },
+          "files": {
+            "description": "For upload: the files' paths in the project.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "frame": {
+            "description": "For an element in a frame from another origin, or keys sent while focus is in one: its origin as its header names it, such as https://pay.example (opaque:https://pay.example if opaque).",
+            "type": "string"
+          },
+          "key": {
+            "description": "For press: Enter, Tab, Escape, Backspace, Delete, an arrow such as ArrowDown, Home, End, PageUp, PageDown, Space, or one character. With a ref, the element is focused first.",
+            "type": "string"
+          },
+          "keys": {
+            "description": "For type: slower, so for short text in a field that suggests only as keys are pressed.",
+            "type": "boolean"
+          },
+          "listing": {
+            "description": "`full` lists the whole page after.",
+            "enum": [
+              "changes",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ref": {
+            "description": "The element's ref, such as e12. For drag: the one picked up.",
+            "type": "string"
+          },
+          "script": {
+            "description": "For eval: the expression.",
+            "type": "string"
+          },
+          "steps": {
+            "description": "For batch: up to 20 actions, each an object with `action` and its fields, such as {\"action\": \"type\", \"ref\": \"e4\", \"text\": \"Ada\"}.",
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "submit": {
+            "type": "boolean"
+          },
+          "text": {
+            "description": "For type: the text. For select: the option's text.",
+            "type": "string"
+          },
+          "to": {
+            "description": "For drag: the ref to drop onto.",
+            "type": "string"
+          },
+          "x": {
+            "description": "For a point click or a drag without `to`: CSS pixels from the view's left.",
+            "type": "number"
+          },
+          "y": {
+            "description": "With x: CSS pixels from the view's top.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "See and use the apps on this computer's screen, for what no command, file or browser tool can do. Every call names its app in `app`, by the name its menu or title bar shows or by its id; the user is asked once for each app. `screenshot` takes a picture of the app's windows, or of the whole screen when no app is named, which the user sees in the chat and you see too when your model takes images. `elements` lists the app's elements on screen, one a line: an id such as e12, its role, name, value and place. `click` clicks an element by `element`, or a spot by `x` and `y` in screen points as the list and screenshots give them; prefer an element. `type` types `text` into what has the keyboard, or into `element` first. `key` presses a key or a combination, such as enter, cmd+s or ctrl+shift+tab. `scroll` scrolls `direction` by `amount` lines at an element or spot.",
+      "name": "computer",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "screenshot",
+              "elements",
+              "click",
+              "type",
+              "key",
+              "scroll"
+            ],
+            "type": "string"
+          },
+          "amount": {
+            "description": "For scroll: how many lines, 5 unless given.",
+            "type": "integer"
+          },
+          "app": {
+            "description": "The app to act on, by its name or id. Only a screenshot of the whole screen leaves it out.",
+            "type": "string"
+          },
+          "direction": {
+            "description": "For scroll.",
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right"
+            ],
+            "type": "string"
+          },
+          "element": {
+            "description": "For click, type and scroll: an id from elements, such as e12.",
+            "type": "string"
+          },
+          "key": {
+            "description": "For key: a key or a combination, such as enter, escape, cmd+s or ctrl+shift+tab.",
+            "type": "string"
+          },
+          "text": {
+            "description": "For type: the words to type.",
+            "type": "string"
+          },
+          "x": {
+            "description": "For click and scroll without an element: the spot's distance from the screen's left edge, in points.",
+            "type": "number"
+          },
+          "y": {
+            "description": "With x: its distance from the top.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Hand a task to a helper agent that works with its own context and reports back. Use it to explore or check many files without filling your own context, not for a few reads you can do yourself. Helpers editing at the same time need separate files, or isolation worktree. Its report is all you get back, and it is the helper's own account: look at what it says it changed or ran before you tell the user it is done. In the window and the terminal it runs in the background by default: carry on or end your turn, and a notice comes when it finishes; do not poll or wait for it. Elsewhere you wait, and its report is this call's result.",
+      "name": "agent",
+      "parameters": {
+        "properties": {
+          "background": {
+            "description": "false waits for the report. Default true in the window and terminal, unless the type says otherwise.",
+            "type": "boolean"
+          },
+          "description": {
+            "description": "Three to five words, shown to the user.",
+            "type": "string"
+          },
+          "fork": {
+            "description": "Start it from a copy of this conversation, so the prompt only says what to do. It keeps your model and tools, whatever type and model say.",
+            "type": "boolean"
+          },
+          "isolation": {
+            "description": "A new git worktree on a branch of its own from HEAD, without your uncommitted edits. Its file tools stay inside it; its commands are not confined. Removed if nothing changed, else the report names its path and branch.",
+            "enum": [
+              "worktree"
+            ],
+            "type": "string"
+          },
+          "keep": {
+            "description": "In the background only: after reporting it stays idle with its context until agents sends it more work, and ends after 30 idle minutes.",
+            "type": "boolean"
+          },
+          "model": {
+            "description": "A model id on this gateway. Default: the type's, then Settings, then yours.",
+            "type": "string"
+          },
+          "name": {
+            "description": "A handle for the agents tool. Defaults to the type.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "The whole task. The helper has not seen this conversation: say what to do, what you already know, and what to report back.",
+            "type": "string"
+          },
+          "type": {
+            "description": "general (default), explore (read-only, cheaper), plan, review, tester, or another type your instructions name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "description",
+          "prompt"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Work with the helpers you started, by name. list: yours and how they are doing. send: a message, which a running helper reads at its next step and a finished or idle one carries on from, with its context. stop: end one early. report: its last answer, whole, in pages. types: the helper types. Never ask another agent to do what was refused or declined here.",
+      "name": "agents",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "send",
+              "stop",
+              "report",
+              "types"
+            ],
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "offset": {
+            "description": "For report: where to start, in characters.",
+            "type": "integer"
+          },
+          "to": {
+            "description": "A helper's name, or \"main\" for the agent that started you.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "The session's task list, shared with every helper of this session; your own step-by-step checklist stays in todo. add: a task with a one-line title, a detail, and blocked_by, the tasks to finish first. list: every task with its status, owner, blockers, who added it and its rev. claim: take an open task, giving the rev you listed; it fails if the task changed since. update: a task's title, detail or owner; \"me\" takes it as claim does, and only the main agent names a helper. done: finish a task you hold, once its blockers are done. reopen: open a done task again, or give back one you hold. drop: cancel a task (main agent only). block: hold a task, or with blocked_by make it wait for others; unblock undoes either. Idle helpers are offered each open task whose blockers are done; one given back again and again is held for the main agent.",
+      "name": "board",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "add",
+              "list",
+              "claim",
+              "update",
+              "done",
+              "reopen",
+              "drop",
+              "block",
+              "unblock"
+            ],
+            "type": "string"
+          },
+          "blocked_by": {
+            "description": "The numbers of the tasks it waits for.",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "id": {
+            "description": "The task's number, as list shows it.",
+            "type": "integer"
+          },
+          "owner": {
+            "description": "\"me\", a helper's name, or \"\" for nobody.",
+            "type": "string"
+          },
+          "rev": {
+            "description": "For claim, or update taking a task: the revision list showed.",
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Run a task in Vythea Cloud, on Vythea's servers, and get its answer. Where to build what the user asks for, in order: a page, chart, document or small app that one self-contained file can hold is written here as an .html or .svg file the user previews; anything else is built here, in the project, with the tools on this computer; only when this computer cannot (a tool it needs is not on PATH and cannot be installed, it would take more memory or time than this machine has, or the user asks for the cloud) send it here. It also hosts: a web app it leaves wakes on each visit, and a bot or worker the user wants kept online (a Discord or Telegram bot listening for events, a scheduler) runs 24/7 from their credit; say so in `task` only when the user asked for it to stay up, and put any keys it needs in `task` for /work/.env. cloud_apps shows what is left running and cloud_app_power takes it down or back up. The cloud cannot see this computer's files: pass folder: true to send it the project folder (what .gitignore keeps, without .git), which works for a local-only repository; or an https `repo` it clones. A https://github.com/<owner>/<name> repo the user connected to the Vythea GitHub App may be private: the task works on its own branch, vythea/<thread>, and what it commits is pushed there and opened as a pull request, never pushed to another branch. Any other repo must be public, and nothing is pushed. Say in your reply that it ran in the cloud, and give the branch and pull request it reports. It costs the user's credit, so each call is asked about.",
+      "name": "cloud_task",
+      "parameters": {
+        "properties": {
+          "branch": {
+            "type": "string"
+          },
+          "folder": {
+            "description": "Send this session's project folder to work in, instead of a repo.",
+            "type": "boolean"
+          },
+          "repo": {
+            "description": "An https git address to clone and work in: public, or a GitHub repo connected to the Vythea GitHub App, whose commits are pushed to a branch of its own with a pull request.",
+            "type": "string"
+          },
+          "task": {
+            "description": "What to do, whole: the cloud sees nothing else of this conversation.",
+            "type": "string"
+          },
+          "thread": {
+            "description": "An earlier cloud run's thread, to carry on in its folder and conversation.",
+            "type": "string"
+          },
+          "tier": {
+            "description": "Memory: light 512 MB (default), normal 1 GB, heavy 2 GB for builds.",
+            "enum": [
+              "light",
+              "normal",
+              "heavy"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "The apps and 24/7 workers (bots and the like) the user's Vythea Cloud runs left running. With no `thread`, lists each with its thread, state and address; with one, shows what it printed last and why it stopped. Use it when the user asks about or checks on something hosted in the cloud; cloud_app_power takes one down or brings it back.",
+      "name": "cloud_apps",
+      "parameters": {
+        "properties": {
+          "thread": {
+            "description": "One app's or worker's thread, to read what it printed.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Take one of the user's Vythea Cloud apps or 24/7 workers down (`up` false), or bring a stopped worker back (`up` true; billed from credit again while it runs). Its thread comes from cloud_apps.",
+      "name": "cloud_app_power",
+      "parameters": {
+        "properties": {
+          "thread": {
+            "type": "string"
+          },
+          "up": {
+            "description": "true to bring it back, false to take it down.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "thread",
+          "up"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "The user's crypto wallet in Vythea: its addresses (EVM chains and Solana), the user's spending rules and caps, what it holds on each network, and what was paid. It never shows a key. Pay a site that asks for payment (HTTP 402, x402) with paid_fetch, and send money with wallet_send.",
+      "name": "wallet",
+      "parameters": {
+        "properties": {
+          "action": {
+            "description": "summary: wallets, rules and caps; balances: what each wallet holds, read from the networks; history: the latest payments.",
+            "enum": [
+              "summary",
+              "balances",
+              "history"
+            ],
+            "type": "string"
+          },
+          "wallet": {
+            "description": "For balances, one wallet by name; all when left out.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Send money from the user's wallet: an amount of a network's native coin or of a token (such as USDC) to an address. The user sees each send on a card and decides, and it must fit the caps they set. A payment to a site that asks for it (HTTP 402) goes through paid_fetch instead.",
+      "name": "wallet_send",
+      "parameters": {
+        "properties": {
+          "amount": {
+            "description": "As a person writes it, such as \"5\" or \"0.25\".",
+            "type": "string"
+          },
+          "from": {
+            "description": "Which wallet pays, by name; the default one when left out.",
+            "type": "string"
+          },
+          "network": {
+            "description": "Base, Ethereum, Arbitrum, Optimism, Polygon, BNB Chain, Avalanche, Solana, a test network, or one the user added; a CAIP-2 id works too.",
+            "type": "string"
+          },
+          "to": {
+            "description": "The address: 0x… on an EVM network, base58 on Solana.",
+            "type": "string"
+          },
+          "token": {
+            "description": "The token's symbol or address, such as USDC; the network's own coin when left out.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "network",
+          "to",
+          "amount"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Read a page or call an API that asks to be paid (HTTP 402 with x402), paying it from the user's wallet in USDC or another token, then return what it gives. Use it when web_fetch reports a price, or for an API known to charge per call. The user's rules decide: a small price may be paid on its own, otherwise the user sees the price on a card; the caps always hold.",
+      "name": "paid_fetch",
+      "parameters": {
+        "properties": {
+          "body": {
+            "description": "For POST, the JSON to send.",
+            "type": "string"
+          },
+          "max_usd": {
+            "description": "The most to pay in dollars, such as \"0.05\"; the price shown on the card, or the per-payment cap, when left out.",
+            "type": "string"
+          },
+          "method": {
+            "description": "GET when left out.",
+            "enum": [
+              "GET",
+              "POST"
+            ],
+            "type": "string"
+          },
+          "url": {
+            "description": "The full address, starting with https://.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Search the tools left out of this list: the user's MCP servers' tools when they are too many to list. Give a few words for what you need done, or a tool's exact name; the matching tools come back with their descriptions and arguments. Then call one with call_mcp_tool.",
+      "name": "find_tools",
+      "parameters": {
+        "properties": {
+          "query": {
+            "description": "Words for what the tool should do, such as \"create issue\", or its exact name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Call a tool that find_tools found: its exact name in `name`, and in `arguments` the arguments find_tools gave for it.",
+      "name": "call_mcp_tool",
+      "parameters": {
+        "properties": {
+          "arguments": {
+            "description": "The tool's arguments.",
+            "type": "object"
+          },
+          "name": {
+            "description": "The tool's name as find_tools gave it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "arguments"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Run a JavaScript workflow that starts many helpers, in the background. Use it only for work that splits into many independent pieces; the user approves each run after seeing its script, phases and cost. The script starts with its meta, a plain literal: export const meta = { name: \"kebab-name\", description: \"...\", phases: [{ title: \"Find\" }, { title: \"Review\" }], estimate: { agents: 40 } }; The body may await and return at the top level. await agent(prompt, { type, label, phase, schema, model, effort }) starts one helper and gives its final text, the checked object when schema (a JSON schema) is given, or null when it failed, ran out of budget or was stopped. Helpers have not seen this conversation: each prompt is a whole task. await pipeline(items, ...stages) takes each item through the stages on its own, with no barrier; a stage is (prev, item, index) => ..., and null ends that item: the default choice. await parallel(items.map(x => () => agent(...))) waits for them all, and a failure becomes null. phase(title) groups the agents after it, log(message) keeps a line in the run's log, args is the JSON given here, and budget.total, budget.spent() and budget.remaining() count tokens, and await workflow(name, args) runs a saved workflow inside this one. There is no Math.random, Date.now, timer, eval, import, file or process: helpers read and write files. At most 1000 agent() calls a run and 4096 items a parallel or pipeline. The result is what the script returns, as JSON. The call returns at once with the run's name, such as wf-3, and a notice brings the result when it ends: do not poll. agents list, stop and report work on runs by name. To pick a run up after a pause, a stop or an edit, call again with resume and, if edited, the new script: finished helpers' answers replay at no cost, and only what changed runs again.",
+      "name": "workflow",
+      "parameters": {
+        "properties": {
+          "args": {
+            "description": "Any JSON, given to the script as args. On a resume, the run's own unless given."
+          },
+          "budget": {
+            "description": "Tokens the whole run may spend; 3000000 unless given, and a resume keeps the run's own.",
+            "type": "integer"
+          },
+          "name": {
+            "description": "A saved workflow to run instead of a script, such as review.",
+            "type": "string"
+          },
+          "resume": {
+            "description": "A run to pick up, such as wf-3: its finished helpers' answers replay and the rest run.",
+            "type": "string"
+          },
+          "script": {
+            "description": "The whole script, meta first. On a resume, leave it out to run the run's own again.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Run JavaScript that calls read-only tools in one step: await tools.read_file({path}), tools.list_dir, tools.search, tools.web_fetch and tools.search_web each take that tool's arguments and give its text, or throw its error. Promise.all runs calls together, 8 at a time. Use it for 3 or more calls with filtering or logic between them, such as fetching many pages and keeping one field from each. Only what you return or console.log comes back, so return just what you need. At most 50 calls and 30 s. A file read here does not count as read before an edit. Use normal calls for single calls, anything you must read in full, writes and commands.",
+      "name": "script",
+      "parameters": {
+        "properties": {
+          "code": {
+            "description": "The script's body, which may await and return at the top level.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Search the web. Returns a numbered list of results, each with its title, address and a snippet. Snippets are cut short and may be stale: read the page that settles a fact with web_fetch, preferring the primary source, and give its address. The same search again within 10 minutes gives the earlier answer.",
+      "name": "search_web",
+      "parameters": {
+        "properties": {
+          "allowed_domains": {
+            "description": "Only results from these sites and their subdomains, such as [\"docs.rs\"]; some services filter after answering, so fewer may come back.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "blocked_domains": {
+            "description": "No results from these sites or their subdomains, even if allowed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "count": {
+            "description": "1 to 10; 5 if left out.",
+            "type": "integer"
+          },
+          "freshness": {
+            "description": "Only pages from this last stretch of time.",
+            "enum": [
+              "day",
+              "week",
+              "month",
+              "year"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "description": "As you would type it into a search engine.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  }
+]

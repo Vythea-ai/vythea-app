@@ -1,0 +1,91 @@
+{
+  "name": "vythea",
+  "displayName": "Vythea",
+  "description": "Use Vythea's terminal from VS Code: open it, hand it the code you select, and see the edits it asks to make as diffs.",
+  "version": "0.1.0",
+  "publisher": "vythea",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Vythea-ai/vythea-app"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vythea.open",
+        "title": "Open in terminal",
+        "category": "Vythea"
+      },
+      {
+        "command": "vythea.addSelection",
+        "title": "Add selection to chat",
+        "category": "Vythea"
+      },
+      {
+        "command": "vythea.addFile",
+        "title": "Add file to chat",
+        "category": "Vythea"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "vythea.addSelection",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k",
+        "when": "editorTextFocus"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "vythea.addSelection",
+          "group": "vythea"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "vythea.addFile",
+          "group": "vythea"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "vythea.addFile",
+          "group": "vythea"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Vythea",
+      "properties": {
+        "vythea.command": {
+          "type": "string",
+          "default": "vythea",
+          "description": "The command that starts Vythea in the terminal."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "test": "tsc -p . && node --test out/test/*.test.js",
+    "package": "tsc -p . && vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "~22.20.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/vsce": "^4.1.0",
+    "typescript": "~5.9.3"
+  }
+}

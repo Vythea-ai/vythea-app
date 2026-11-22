@@ -1,0 +1,55 @@
+# Configuration
+
+Most settings are in the window's Settings and in `/` commands. Both are stored in `settings.json` in the [data folder](data-and-privacy.md). The other files there are described in [Extending](extending.md).
+
+## Environment variables
+
+### Install
+
+| Variable | Effect |
+|---|---|
+| `VYTHEA_DOWNLOAD` | Install from a different archive (a URL or a local file) |
+| `VYTHEA_NO_SETUP=1` | Unpack without asking the setup questions |
+
+### Data and gateways
+
+| Variable | Effect |
+|---|---|
+| `AGENT_DATA_DIR` | Use a different data folder |
+| `VYTHEA_API` | Point the Vythea gateway at another API, such as a local one |
+| `VYTHEA_ALLOW_HTTP=1` | Allow plain-HTTP gateways on the local network, not just on localhost. The key travels unencrypted. |
+| `VYTHEA_READ_TIMEOUT` | Seconds of silence before a reply is given up on (30–3600; default 300) |
+| `VYTHEA_CONTEXT_WINDOW`, `VYTHEA_MAX_OUTPUT` | Override the model's context window and output limit, in tokens. When nothing gives a model's window, a server that takes a key is assumed to hold 64,000 tokens, and one that takes none, such as Ollama, a small window. Set it for a keyed proxy in front of a small local model, which may cut long prompts short without saying so. |
+| `VYTHEA_REASONING_REPLAY` | `full` (the default) sends DeepSeek and Kimi the reasoning behind every tool call of the turn in progress; `chunked` sends an empty one with the turn's older calls once their reasoning comes to 8,000 tokens, and then a chunk at a time, so the requests in between keep the provider's prompt cache. The `reasoning_replay` setting says the same for every run. |
+
+### Browser
+
+| Variable | Effect |
+|---|---|
+| `VYTHEA_BROWSER` | Path of the browser to drive |
+| `VYTHEA_BROWSER_HEADLESS=0` | Give the browser a visible window |
+| `VYTHEA_BROWSER_URL` | Use a remote browser: `ws(s)://…` for a cloud service, or `http://host:9222` for a Chrome started with `--remote-debugging-port`. Prefer an SSH tunnel, because anyone who can reach that port can drive the browser. |
+
+### Misc
+
+| Variable | Effect |
+|---|---|
+| `VYTHEA_DISCORD_APP_ID` | Discord application for rich presence |
+
+## Headless runs
+
+`vythea -p` can run with nothing set up, for example inside a container:
+
+| Variable | Effect |
+|---|---|
+| `AGENT_BASE_URL`, `AGENT_API_KEY`, `AGENT_MODEL` | A Custom gateway for this run only (`-p`, or the terminal with `VYTHEA_DISPOSABLE=1`). Nothing is saved. |
+| `VYTHEA_COAUTHOR=0` | Name no co-author on the run's commits, whatever Settings › Privacy says. Vythea Cloud sets it, as it credits its sessions' commits itself. |
+| `VYTHEA_DEADLINE` | Seconds the run may take. Set it a little under the harness's kill time so the run ends with its result line, whose status is then `deadline`. |
+| `VYTHEA_DISPOSABLE=1` | Declares the machine throwaway, as in a benchmark container. Unattended Bypass runs may then use commands that are hard to undo, such as `rm -r` or `git reset --hard`. Never set it on a machine whose files matter. |
+| `VYTHEA_PROGRESS_NOTE_ROUNDS` | Rounds a run nobody watches may go without changing the project before it is asked to say, in one line, what it has established and its next step (default 12; again at twice and three times that; 0 never asks). |
+
+Even without `VYTHEA_DISPOSABLE`, an unattended Bypass run on macOS and Linux may delete folders strictly inside its project. It still refuses:
+
+- the project itself and `.git`
+- anything outside the project, or reached through a link that leads out of it
+- any path it cannot fully resolve

@@ -1,0 +1,116 @@
+[package]
+name = "vythea-gui"
+description = "A small native desktop agent built with GPUI"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "vythea-gui"
+path = "src/main.rs"
+
+[dependencies]
+vythea-core.workspace = true
+serde_json.workspace = true
+async-channel.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+# GPUI comes as the `gpui-pre` snapshot of zed's crates that GPUI Kit pins,
+# under the names GPUI Kit gives them; `gpui_platform` opens the window
+# system. The `tree-sitter` feature is the code highlighter, and the
+# grammars it is given are below.
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "x11", "wayland"] }
+gpui-component = { version = "=0.7.1", features = ["tree-sitter"] }
+# Already in the tree via gpui-component; a reply is drawn with its text view
+# (see theme::reply_text_style).
+gpui-base = "=0.7.1"
+discord-rich-presence = "1"
+# Already in the tree via vythea-core. The Claude Code plugin's link proves
+# both ends know its token (HMAC) and draws the token and nonces.
+ring = "0.17"
+image = "0.25"
+# Already in the tree via gpui-component. The system says when the terminal
+# writes a session, so the window follows it without polling the folder.
+notify = "8"
+# Plays speech a tool made, in the chat: playback and the formats voices come
+# back in, and no recording.
+rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "wav", "flac", "vorbis"] }
+# Grammars registered by hand with gpui-component's `LanguageRegistry`
+# (see src/highlight.rs), instead of its `tree-sitter-languages` feature,
+# which links all 33 of its bundled grammars whether a chat shows them or
+# not. `tree-sitter` itself and `tree-sitter-json` come in already, via
+# gpui-component.
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-yaml = "0.7"
+tree-sitter-bash = "0.23"
+tree-sitter-diff = "0.1"
+# Windows, macOS and X11; Wayland grants no global key at all, so there the
+# tray's "Quick entry" item is the only way in.
+global-hotkey = "0.7"
+# Already in the tree via rodio, but not exposed by it: rodio only plays
+# sound, so the mic button opens an input stream with cpal directly.
+cpal = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.25"
+raw-window-handle = "0.6"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Threading", "Win32_Security", "Win32_Graphics_Gdi", "Win32_Storage_Xps"] }
+# Already in the tree via cpal. The shell's own thumbnailer gives the first
+# frame of a video a tool made, as Explorer shows it, and Media Foundation
+# decodes the video to play it in the chat.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    # Toasts, and the Start menu shortcut's AppUserModelID they are shown under.
+    "Foundation",
+    "Data_Xml_Dom",
+    "UI_Notifications",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The menu bar icon, top right; the menu is the system's own.
+tray-icon = "0.25"
+# Command Line Tools ship no `xcrun metal`, so let the Metal driver compile the
+# shaders at startup rather than at build time.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["runtime_shaders"] }
+# Both already in the tree via gpui; used to reach the NSWindow behind a gpui
+# window and give it the dark appearance.
+raw-window-handle = "0.6"
+objc = "0.2"
+# The completion handlers the user notification centre takes.
+block = "0.1"
+# Already in the tree via gpui: the window server's picture of the window,
+# which the modal backdrop blurs.
+core-graphics = "0.24"
+# Already in the tree via gpui, and kept in vendor/: its Metal renderer reads
+# the window's own frame back for the backdrop on macOS 26.
+gpui-pre-apple = "=0.3.8"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# KSNI speaks StatusNotifierItem over D-Bus on a worker thread, so there is no
+# GTK main loop to reconcile with gpui's, and no appindicator/libxdo to install.
+tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
+# Already in the tree via gpui: reading the window back for the modal
+# backdrop, over a connection of our own.
+x11rb = "0.13"
+
+[dev-dependencies]
+# Test windows, for the tests of where the keys go.
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
+
+[build-dependencies]
+embed-resource = "3"

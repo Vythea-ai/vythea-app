@@ -1,0 +1,1152 @@
+//! Drawing to the terminal.
+//!
+//! Everything prints into ordinary scrollback rather than taking over the
+//! screen: what Vythea said is still there after you quit, selection and
+//! mouse scroll keep working, and piping it somewhere behaves. That rules out
+//! panes that update in place, which is the trade accepted here.
+
+use std::io::{IsTerminal, Write};
+
+/// Raw mode is on for as long as the input box holds the bottom of the
+/// window, and in raw mode a newline moves down without returning to the left
+/// margin. Everything that prints a line asks here for the right one.
+static RAW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_raw(on: bool) {
+    RAW.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn nl() -> &'static str {
+    if RAW.load(std::sync::atomic::Ordering::Relaxed) {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// The caret, drawn over whatever character it sits on. The real cursor
+/// cannot be parked there: it has to stay where output lands, or a redraw
+/// would pull the conversation out of line.
+pub fn caret_over(text: &str) -> String {
+    if ansi() {
+        format!("\x1b[7m{text}\x1b[0m",)
+    } else {
+        text.to_owned()
+    }
+}
+
+/// Whether stdin is a terminal, so the line editor can take over keystrokes.
+/// Piped input has to go through the plain reader instead.
+pub fn interactive() -> bool {
+    std::io::stdin().is_terminal() && ansi()
+}
+
+/// Text as one plain line: line breaks and other control characters become
+/// spaces, which then run together, so a session named from the first lines
+/// of a prompt, or from text holding escape codes, can neither break a row
+/// nor reach the terminal as a command.
+pub fn one_line(text: &str) -> String {
+    let spaced: String = (text.chars())
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Name the window, the way a terminal program should; `title::restore`
+/// puts the old name back on the way out.
+pub fn title(text: &str) {
+    if ansi() {
+        print!("]0;{text}");
+        flush();
+    }
+}
+
+/// Start from a clean screen, so the shell's own banner is not the first
+/// thing in the transcript.
+pub fn clear() {
+    if crate::screen::held() {
+        crate::screen::wipe();
+        return;
+    }
+    if ansi() {
+        print!("[2J[3J[H");
+        flush();
+    }
+}
+
+/// ANSI colours, unless output is being piped, the terminal cannot take
+/// escapes, or `NO_COLOR` opts out of colour.
+pub fn colour() -> bool {
+    ansi() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// Whether the terminal takes escape sequences at all: the box, the caret,
+/// a selection and the window's title need them whatever the colours.
+/// `NO_COLOR` asks for no colour, not for no box.
+pub fn ansi() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        if !std::io::stdout().is_terminal() {
+            return false;
+        }
+        // TERM is a Unix convention and cmd.exe does not set it, so asking for
+        // it on Windows turns everything off in the one shell most people start
+        // from. Ask the console itself instead: this also switches on virtual
+        // terminal processing, without which the escapes below would be printed
+        // literally.
+        #[cfg(windows)]
+        {
+            crossterm::ansi_support::supports_ansi()
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::var("TERM").is_ok_and(|t| t != "dumb")
+        }
+    })
+}
+
+fn wrap(code: &str, text: &str) -> String {
+    if colour() {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_owned()
+    }
+}
+
+pub fn dim(text: &str) -> String {
+    wrap("2", text)
+}
+pub fn bold(text: &str) -> String {
+    wrap("1", text)
+}
+pub fn blue(text: &str) -> String {
+    wrap(crate::theme::now().blue, text)
+}
+pub fn red(text: &str) -> String {
+    wrap(crate::theme::now().red, text)
+}
+pub fn green(text: &str) -> String {
+    wrap(crate::theme::now().green, text)
+}
+pub fn amber(text: &str) -> String {
+    wrap(crate::theme::now().amber, text)
+}
+
+/// The left margin of the input box.
+pub const MARGIN: &str = "  ";
+
+/// Where a mark -- the arrow on your line, the bullet on an answer -- sits.
+/// It lines up with the left edge of the box rather than the arrow inside it:
+/// the conversation and the thing you type into start at the same column, so
+/// there is one edge down the page and not two.
+pub const GUTTER: &str = "  ";
+
+/// Where the words start, mark or no mark. `GUTTER` plus a mark and a space
+/// comes to the same place, which is what keeps the two sides level.
+pub const PAD: &str = "    ";
+
+/// The arrow's column inside the box: past the margin, the border and the
+/// space after it. The waiting line belongs here rather than out in the
+/// conversation, because nothing has been said yet -- it is the box thinking,
+/// not Vythea talking.
+pub const INSIDE: &str = "    ";
+
+/// The face on the tin, as characters: Vythea's own character, drawn from the portrait on the
+/// website. Twenty-eight columns wide, which
+/// leaves room for the startup details beside it on an eighty-column
+/// terminal.
+pub const FACE: &[&str] = &[
+    "⠀⠀⣾⡿⡟⡋⠁⠈⢀⠀⠀⠀⠀⠀⠀⠀⠀⡀⠀⡈⠘⠝⢿⣿⡿⣏⣮⣄",
+    "⠀⣠⢔⡪⠀⠄⠠⠈⠀⠀⠀⢁⠀⠀⡀⠀⠄⡀⠠⠀⠠⠀⠁⢆⡏⣟⢿⢿",
+    "⣿⠟⡨⠐⠀⠢⠁⠀⠐⠀⠐⠀⠀⠀⡀⢂⠀⠐⠈⠠⠐⠈⠈⠐⠙⢎⢿⣷",
+    "⢖⠁⢀⠠⠈⠀⠀⠀⠁⢰⡁⡀⠀⠀⠀⡂⡢⢀⠀⠀⠠⠀⠀⠂⠠⠀⡑⡘",
+    "⠃⠂⠁⠀⠀⠀⠄⢀⢁⢵⢵⠀⠄⡀⠐⡈⡾⡤⣂⢁⠐⠐⠠⠂⠐⠑⠘⢜",
+    "⠂⠅⠈⠀⠀⢀⠂⠀⣃⠉⡁⣱⣡⣐⢥⣨⣊⢈⢀⢅⠂⠀⠂⠀⠁⠐⠐",
+    "⠠⠁⠄⠁⠐⢀⠀⢁⢳⣿⣾⣿⣿⣟⣷⣿⣿⣿⣻⢟⠠⠀⢄⠄⠂⠈⠠",
+    "⢃⠂⠀⠐⠈⢢⢕⠄⠳⣷⣿⣿⣿⢿⢿⣿⣿⣿⢷⠣⠂⢨⢆⠃⠀⠂⢈",
+    "⠀⢀⠈⠀⠠⠀⠈⠁⢉⠺⢿⣿⣿⣿⣿⣿⣿⡽⠍⠂⠠⠁⠀⠀⠐⠀⠠⠈",
+    "⠀⡰⠀⢁⠀⠁⠠⠀⠀⠀⠀⢩⢙⠻⣛⢫⡱⡁⢀⠊⠀⠀⠠⠂⠀⠈⠠⡑",
+    "⠀⠈⠀⠰⡡⠀⡐⠀⠁⠀⠄⢰⣣⢧⣳⣷⣹⠄⢀⢀⠁⠀⠔⢀⠢⠀⠑",
+    "⠀⠀⠀⠀⠈⠀⠙⠀⠈⠂⠂⠘⠉⠁⠁⠀⠀⠀⠀⠀⠈⠀⠀⠈⠉",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⠐⠀⠀⠀⣀⣄⡴⡴⣲⣄⠄",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠐⠀⠀⢀⢀⣤⢶⣟⡾⡖⠕⠊⠁⠀⠄⠂",
+];
+
+/// Width the face is padded to, so the column beside it lines up.
+pub const FACE_WIDTH: usize = 28;
+
+/// Room between the face and the details beside it. The face is drawn from a
+/// photograph, so its edge is ragged and a couple of spaces read as none at
+/// all; this is wide enough that the two are clearly separate things.
+pub const FACE_GAP: usize = 6;
+
+pub fn line(text: &str) {
+    out(&format!("{PAD}{text}"), true);
+}
+
+/// A line with a mark in front of it. The mark stands in the two columns the
+/// indent would otherwise occupy, so a marked line and an ordinary one put
+/// their text in the same place -- which is the whole point of the indent.
+pub fn said(mark: &str, text: &str) {
+    out(&format!("{GUTTER}{mark} {text}"), true);
+}
+
+/// Everything printed goes through here, so raw mode's need for a carriage
+/// return with every newline is dealt with once.
+pub fn out(text: &str, newline: bool) {
+    // Only Vythea's own colours reach a terminal; what the text carries
+    // from outside goes. Piped, the text is passed on as it is.
+    let cleaned;
+    let text = if crate::screen::held() || std::io::stdout().is_terminal() {
+        cleaned = safe(text);
+        cleaned.as_str()
+    } else {
+        text
+    };
+    if crate::screen::held() {
+        crate::screen::push(text);
+        if newline {
+            crate::screen::push("\n");
+        }
+        return;
+    }
+    if newline {
+        print!("{text}{}", nl());
+    } else {
+        print!("{text}");
+    }
+    flush();
+}
+
+/// Rows laid out for the window's width, and laid out again whenever it
+/// changes while the conversation is held: for the opening screen, which
+/// wrapping would break apart.
+pub fn block(lay_out: impl Fn(usize) -> Vec<String> + Send + 'static) {
+    if crate::screen::held() {
+        crate::screen::block(Box::new(lay_out));
+        return;
+    }
+    for row in lay_out(width()) {
+        out(&row, true);
+    }
+}
+
+/// Terminal width, or a sane guess when it cannot be asked.
+pub fn width() -> usize {
+    crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80)
+}
+
+/// A line apart from what came before, and only one: a part of the
+/// conversation that opens with a gap, after one that ended with one, is
+/// still a line away rather than two.
+pub fn blank() {
+    if crate::screen::held() && crate::screen::after_blank() {
+        return;
+    }
+    out("", true);
+}
+
+pub fn flush() {
+    let _ = std::io::stdout().flush();
+}
+
+/// The mark on the model's side of the conversation, the width of the indent
+/// so answers keep the column.
+pub fn bullet() -> String {
+    format!("{GUTTER}{} ", blue("●"))
+}
+
+/// Print streamed text as it arrives, indenting each new line so a wrapped
+/// answer keeps the column.
+///
+/// `**bold**` and `` `code` `` become real emphasis on the way past. It is a
+/// state machine rather than a parse because the text arrives in pieces and a
+/// marker can be split across two of them; buffering whole lines to format
+/// them would cost the word-by-word arrival that makes a terminal feel alive.
+#[derive(Default)]
+pub struct Stream {
+    /// Printed in place of the indent on the first line, so an answer opens
+    /// with a bullet and its wrapped lines still sit in the same column.
+    lead: Option<String>,
+    at_line_start: bool,
+    bold: bool,
+    code: bool,
+    /// One `*` seen, waiting to find out whether it is half of a pair.
+    star: bool,
+    started: bool,
+    /// The start of an escape sequence the last piece ended in, held for the
+    /// next: taken out in two halves, half of one would show as text.
+    half_escape: String,
+    /// Whether the line under way has had anything in it yet; until it has,
+    /// its first characters are held to see whether it opens a fence or is
+    /// a heading.
+    mid_line: bool,
+    /// The characters held at the start of a line.
+    held: String,
+    /// A fence line being read, for the language it names.
+    fence: Option<String>,
+    /// Inside a fenced block, whose lines are drawn whole and highlighted.
+    in_block: bool,
+    block_line: String,
+    /// Inside a heading, drawn bold to the end of its line.
+    heading: bool,
+}
+
+impl Stream {
+    /// A stream that opens with `lead` instead of the usual indent. It has to
+    /// be the width of the indent, or the first line will not line up with
+    /// the rest.
+    pub fn opening_with(lead: String) -> Self {
+        Self {
+            lead: Some(lead),
+            ..Default::default()
+        }
+    }
+
+    /// The bullet or the indent a line starts with, before anything on it:
+    /// before a style is switched on too, or the reset the bullet ends in
+    /// would switch it off again.
+    fn open_line(&mut self, out: &mut String) {
+        if !self.started {
+            self.at_line_start = true;
+            self.started = true;
+        }
+        if self.at_line_start {
+            match self.lead.take() {
+                Some(lead) => out.push_str(&lead),
+                None => out.push_str(PAD),
+            }
+            self.at_line_start = false;
+        }
+    }
+
+    /// Text is built up and handed over in one piece rather than written a
+    /// character at a time: a frame is painted for each piece, and a frame
+    /// per character would be an answer spent repainting itself.
+    fn emit(&mut self, out: &mut String, ch: char) {
+        if !self.started {
+            self.at_line_start = true;
+            self.started = true;
+        }
+        if ch != '\n' {
+            self.open_line(out);
+        }
+        out.push(ch);
+        if ch == '\n' {
+            self.at_line_start = true;
+        }
+    }
+
+    fn toggle(&mut self, out: &mut String, on: bool, code: &str) {
+        if colour() {
+            self.open_line(out);
+            out.push_str(if on { code } else { "\x1b[0m" });
+        }
+    }
+
+    pub fn push(&mut self, text: &str) {
+        let mut buffer = String::with_capacity(text.len() + 8);
+        self.piece(&mut buffer, text);
+        out(&buffer, false);
+    }
+
+    /// One piece of the reply into `out`, an escape sequence it ends in the
+    /// middle of held for the next piece to finish.
+    fn piece(&mut self, out: &mut String, text: &str) {
+        let joined = std::mem::take(&mut self.half_escape) + text;
+        let (whole, open) = open_escape(&joined);
+        for ch in whole.chars() {
+            self.take(out, ch);
+        }
+        // One that has gone on past a line's end, or for longer than a title
+        // or a link takes, will not end; held, it would keep back the rest
+        // of the reply for good.
+        if open.len() > HALF_ESCAPE_MOST || open.contains('\n') {
+            self.broken(out, open);
+        } else {
+            self.half_escape = open.to_owned();
+        }
+    }
+
+    /// An escape sequence that will never end, as text: what follows its
+    /// escape shows, rather than all of it being taken out as one.
+    fn broken(&mut self, out: &mut String, open: &str) {
+        for ch in open.chars().skip(1) {
+            self.take(out, ch);
+        }
+    }
+
+    /// One character of the reply, where it falls: inside a fenced block,
+    /// on a fence, at the start of a line that may open one or be a heading,
+    /// or in a line of prose.
+    fn take(&mut self, out: &mut String, ch: char) {
+        if self.in_block {
+            if ch != '\n' {
+                self.block_line.push(ch);
+                return;
+            }
+            let line = std::mem::take(&mut self.block_line);
+            // The closing fence is not drawn, as the opening one is not.
+            if line.trim_start().starts_with("```") {
+                self.in_block = false;
+                return;
+            }
+            self.block(out, &line);
+            return;
+        }
+        if let Some(fence) = self.fence.as_mut() {
+            if ch != '\n' {
+                fence.push(ch);
+                return;
+            }
+            let language = self.fence.take().unwrap_or_default();
+            self.in_block = true;
+            // The language, dim, in place of the fence that named it.
+            if !language.trim().is_empty() {
+                for c in dim(language.trim()).chars() {
+                    self.emit(out, c);
+                }
+                self.emit(out, '\n');
+            }
+            return;
+        }
+        if !self.mid_line {
+            self.held.push(ch);
+            if self.held == "```" {
+                self.held.clear();
+                self.fence = Some(String::new());
+                return;
+            }
+            let hashes = self.held.chars().take_while(|c| *c == '#').count();
+            let fencing = "```".starts_with(self.held.as_str());
+            let heading_so_far = hashes == self.held.chars().count() && hashes <= 6;
+            if fencing || heading_so_far {
+                return;
+            }
+            let held = std::mem::take(&mut self.held);
+            if hashes > 0 && hashes <= 6 && held.chars().nth(hashes) == Some(' ') {
+                // A heading: bold to the end of the line, its marks dropped.
+                self.heading = true;
+                self.toggle(out, true, "\x1b[1m");
+                self.mid_line = true;
+                return;
+            }
+            for c in held.chars() {
+                self.inline(out, c);
+            }
+            return;
+        }
+        self.inline(out, ch);
+    }
+
+    /// A line of a fenced block, highlighted as the diffs are, with no
+    /// Markdown read into it: `**` and backticks are code there.
+    fn block(&mut self, out: &mut String, line: &str) {
+        for c in crate::syntax::paint(line).chars() {
+            self.emit(out, c);
+        }
+        if colour() {
+            out.push_str("\x1b[0m");
+        }
+        self.emit(out, '\n');
+    }
+
+    /// A character of prose: `**` for bold and backticks for code.
+    fn inline(&mut self, out: &mut String, ch: char) {
+        if self.star {
+            self.star = false;
+            if ch == '*' {
+                self.bold = !self.bold;
+                let bold = self.bold;
+                self.toggle(out, bold, "\x1b[1m");
+                return;
+            }
+            self.emit(out, '*');
+        }
+        match ch {
+            '*' => self.star = true,
+            '`' => {
+                self.code = !self.code;
+                let code = self.code;
+                let ink = format!("\x1b[{}m", crate::theme::now().code);
+                self.toggle(out, code, &ink);
+            }
+            '\n' => {
+                if std::mem::take(&mut self.heading) {
+                    self.toggle(out, false, "");
+                }
+                self.emit(out, '\n');
+                self.mid_line = false;
+            }
+            _ => {
+                self.emit(out, ch);
+                self.mid_line = true;
+            }
+        }
+    }
+
+    /// Finish the current line, if one is open, and drop any formatting still
+    /// hanging so what comes after it is not tinted.
+    pub fn end(&mut self) {
+        let mut buffer = String::new();
+        // An escape the reply never finished goes out as text, as one that
+        // went on too long does.
+        let half = std::mem::take(&mut self.half_escape);
+        self.broken(&mut buffer, &half);
+        // What a line start held, a fence line never ended or a block line
+        // never ended goes out as it is.
+        let held = std::mem::take(&mut self.held);
+        for c in held.chars() {
+            self.inline(&mut buffer, c);
+        }
+        if let Some(fence) = self.fence.take() {
+            for c in format!("```{fence}").chars() {
+                self.emit(&mut buffer, c);
+            }
+        }
+        if self.in_block && !self.block_line.is_empty() {
+            let line = std::mem::take(&mut self.block_line);
+            for c in crate::syntax::paint(&line).chars() {
+                self.emit(&mut buffer, c);
+            }
+        }
+        self.in_block = false;
+        if self.star {
+            self.star = false;
+            self.emit(&mut buffer, '*');
+        }
+        if (self.bold || self.code || self.heading) && colour() {
+            buffer.push_str("\x1b[0m");
+        }
+        self.bold = false;
+        self.code = false;
+        self.heading = false;
+        self.mid_line = false;
+        // A reply that never started, one that only called a tool, has no
+        // line to close.
+        let close = self.started && !self.at_line_start;
+        self.at_line_start = true;
+        out(&buffer, close);
+    }
+}
+
+/// Break one line into rows that fit, keeping words whole where they will
+/// go whole. Escape sequences take no width and travel with the text they
+/// colour, so a run of colour still open at a break carries on to the next
+/// row rather than stopping there.
+pub fn fold(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    // What the line is indented by, so the rest of it hangs under its own
+    // first word instead of falling back to the margin. Without this a poem
+    // or a block of code goes ragged at the left as soon as a line is too
+    // long for the window.
+    let indent = hanging(line).min(width / 2);
+    let carry = " ".repeat(indent);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut filled = 0usize;
+    // The colour and style switched on so far, which a row broken in the
+    // middle of them starts with again: each row is drawn on its own, ending
+    // in a reset.
+    let mut active = String::new();
+
+    for (word, wide) in words(line) {
+        // A space at the head of a row is the one left behind by the break;
+        // dropping it keeps the text against the margin. The line's own
+        // leading spaces are not that, and are kept.
+        if word.trim().is_empty() && !rows.is_empty() && filled == indent {
+            continue;
+        }
+        if filled + wide <= width {
+            row.push_str(&word);
+            styled(&mut active, &word);
+            filled += wide;
+            continue;
+        }
+        if filled > indent {
+            // The space the break happened at would otherwise hang off the
+            // end of the row it was in.
+            let mut done = std::mem::take(&mut row);
+            while done.ends_with(' ') {
+                done.pop();
+            }
+            rows.push(done);
+            row.push_str(&carry);
+            row.push_str(&active);
+            filled = indent;
+            if word.trim().is_empty() {
+                continue;
+            }
+        }
+        // A word too long for any row is cut rather than left to overflow.
+        if wide > width {
+            let mut escape = String::new();
+            for ch in word.chars() {
+                // An escape, or a character inside one, takes no room.
+                if ch == '\x1b' || !escape.is_empty() {
+                    row.push(ch);
+                    escape.push(ch);
+                    if ch.is_ascii_alphabetic() {
+                        styled(&mut active, &escape);
+                        escape.clear();
+                    }
+                    continue;
+                }
+                // A wide character that would straddle the edge goes on the
+                // next row whole.
+                let room = columns(ch);
+                if filled + room > width && filled > indent {
+                    rows.push(std::mem::take(&mut row));
+                    row.push_str(&carry);
+                    row.push_str(&active);
+                    filled = indent;
+                }
+                row.push(ch);
+                filled += room;
+            }
+            continue;
+        }
+        row.push_str(&word);
+        styled(&mut active, &word);
+        filled += wide;
+    }
+    rows.push(row);
+    rows
+}
+
+/// Follow, in `active`, the colour and style `text` leaves switched on: a
+/// reset clears it, and every other one is added.
+fn styled(active: &mut String, text: &str) {
+    let mut rest = text;
+    while let Some(at) = rest.find("\x1b[") {
+        let tail = &rest[at + 2..];
+        let Some(end) = tail.find(|c: char| c.is_ascii_alphabetic()) else {
+            break;
+        };
+        if tail.as_bytes()[end] == b'm' {
+            match &tail[..end] {
+                "" | "0" => active.clear(),
+                _ => active.push_str(&rest[at..at + 2 + end + 1]),
+            }
+        }
+        rest = &tail[end + 1..];
+    }
+}
+
+/// The column the rest of a line should hang from: whatever it is indented
+/// by, and past a marker where one opens it. The bullet on an answer, the
+/// arrow on a question and the dashes and numbers of a list all read as one
+/// column when what follows them lines up underneath.
+fn hanging(line: &str) -> usize {
+    let visible: Vec<char> = printing(line);
+    let mut at = 0;
+    while visible.get(at) == Some(&' ') {
+        at += 1;
+    }
+    let mark = match visible.get(at) {
+        Some('●') | Some('›') | Some('⏺') | Some('•') | Some('-') | Some('*') => 1,
+        Some(digit) if digit.is_ascii_digit() => {
+            let mut end = at;
+            while visible.get(end).is_some_and(|c| c.is_ascii_digit()) {
+                end += 1;
+            }
+            // "1." and "2)" open a list; a bare number is just a number.
+            match visible.get(end) {
+                Some('.') | Some(')') => end + 1 - at,
+                _ => 0,
+            }
+        }
+        _ => 0,
+    };
+    if mark > 0 && visible.get(at + mark) == Some(&' ') {
+        return at + mark + 1;
+    }
+    at
+}
+
+/// The characters of `text` that take up room, with the escapes dropped.
+fn printing(text: &str) -> Vec<char> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Split into words and the runs of spaces between them, each with the width
+/// it will take. Escape sequences ride along with whatever follows them.
+fn words(line: &str) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut current = String::new();
+    let mut wide = 0usize;
+    let mut space = false;
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            current.push(ch);
+            for next in chars.by_ref() {
+                current.push(next);
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        let is_space = ch == ' ';
+        if wide > 0 && is_space != space {
+            out.push((std::mem::take(&mut current), wide));
+            wide = 0;
+        }
+        space = is_space;
+        current.push(ch);
+        wide += columns(ch);
+    }
+    if !current.is_empty() {
+        out.push((current, wide));
+    }
+    out
+}
+
+/// Break text into rows that fit, for anything that has to lay itself out
+/// before handing the result over.
+/// The text of a line with the escapes taken out, for putting on a
+/// clipboard, where colour is not wanted and would not survive anyway.
+pub fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Turn a run of a line inside out, for showing what is selected.
+///
+/// The row is rewritten without its own colour first. Reverse video is just
+/// another attribute, so the first reset the line carries -- and a coloured
+/// line is full of them -- would switch the highlight off again halfway
+/// through. Losing the colour of a row while it is marked is a small price
+/// for the mark being visible at all.
+pub fn mark(text: &str, from: usize, to: Option<usize>) -> String {
+    let plain = plain(text);
+    let chars: Vec<char> = plain.chars().collect();
+    // `from` and `to` are columns, which a wide character takes two of.
+    let to = to
+        .map_or(chars.len(), |to| char_at(&plain, to))
+        .min(chars.len());
+    let from = char_at(&plain, from).min(to);
+    let before: String = chars[..from].iter().collect();
+    let span: String = chars[from..to].iter().collect();
+    let after: String = chars[to..].iter().collect();
+    if !ansi() {
+        return plain;
+    }
+    format!("{before}\x1b[7m{span}\x1b[27m{after}")
+}
+
+/// Width of text as printed, ignoring the escapes that colour it: a wide
+/// character takes two columns.
+pub fn visible(text: &str) -> usize {
+    let mut width = 0;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            width += columns(ch);
+        }
+    }
+    width
+}
+
+/// Columns `ch` takes on a terminal: two for the wide characters of
+/// Chinese, Japanese and Korean and for most emoji, none for a mark that
+/// combines with the one before it, one for the rest.
+pub fn columns(ch: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+/// Which character of plain `text` covers `column`, counting wide ones as
+/// two: a place on the screen as a place in the text.
+pub fn char_at(text: &str, column: usize) -> usize {
+    let mut used = 0;
+    for (at, ch) in text.chars().enumerate() {
+        used += columns(ch);
+        if used > column {
+            return at;
+        }
+    }
+    text.chars().count()
+}
+
+/// The first `width` columns of plain `text`, a wide character that would
+/// straddle the end left out.
+pub fn take_columns(text: &str, width: usize) -> String {
+    let mut used = 0;
+    let mut cut = String::new();
+    for ch in text.chars() {
+        let wide = columns(ch);
+        if used + wide > width {
+            break;
+        }
+        used += wide;
+        cut.push(ch);
+    }
+    cut
+}
+
+/// The most of an escape sequence a stream holds for its next piece to
+/// finish: more than a title or a link takes, and little enough that a
+/// stray escape holds back no more than a line.
+const HALF_ESCAPE_MOST: usize = 512;
+
+/// `text` split before an escape sequence it ends in the middle of, if it
+/// does: what can be cleaned now, and the start of one that the next piece
+/// of a stream finishes.
+fn open_escape(text: &str) -> (&str, &str) {
+    let Some(at) = text.rfind('\x1b') else {
+        return (text, "");
+    };
+    let tail = &text[at + 1..];
+    let mut chars = tail.chars();
+    let finished = match chars.next() {
+        None => false,
+        Some('[') => chars.any(|c| ('\x40'..='\x7e').contains(&c)),
+        Some(']' | 'P' | 'X' | '^' | '_') => tail.contains('\x07') || tail.contains("\x1b\\"),
+        Some(_) => true,
+    };
+    match finished {
+        true => (text, ""),
+        false => text.split_at(at),
+    }
+}
+
+/// `text` with every escape sequence taken out but those that colour and
+/// style it, and the other control characters with them, bar line breaks.
+/// A reply, a file or a command's output can carry sequences that retitle
+/// the window, write to the clipboard, move the cursor or leave the screen
+/// the conversation is held on; only colour and style, which is all
+/// Vythea writes itself, is let through. Tabs become four spaces, so a
+/// row is as wide as it is counted.
+pub fn safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' => match chars.next() {
+                // A control sequence: kept only when it sets colour or style.
+                Some('[') => {
+                    let mut body = String::new();
+                    let mut last = None;
+                    for next in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&next) {
+                            last = Some(next);
+                            break;
+                        }
+                        body.push(next);
+                    }
+                    let styling = body
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == ';' || c == ':');
+                    if last == Some('m') && styling {
+                        out.push_str("\x1b[");
+                        out.push_str(&body);
+                        out.push('m');
+                    }
+                }
+                // A string -- a title, a clipboard, a device's own -- ended
+                // by a bell or by escape and a backslash.
+                Some(']' | 'P' | 'X' | '^' | '_') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\x07' {
+                            break;
+                        }
+                        if next == '\x1b' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                // Escape and one character, such as a reset of the terminal.
+                _ => {}
+            },
+            '\n' => out.push('\n'),
+            '\t' => out.push_str("    "),
+            control if control.is_control() => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Plain text on a single row, its line breaks made spaces, cut to `width`
+/// columns with an ellipsis where it was cut.
+pub fn fit(text: &str, width: usize) -> String {
+    let text = vythea_core::tools::one_line(text);
+    if visible(&text) <= width {
+        return text;
+    }
+    let mut cut = take_columns(&text, width.saturating_sub(1));
+    if width > 0 {
+        cut.push('…');
+    }
+    cut
+}
+
+/// Plain text cut to `width` columns, ending in an ellipsis where it was
+/// cut, for a row that must not wrap.
+pub fn clip(text: &str, width: usize) -> String {
+    if visible(text) <= width {
+        return text.to_owned();
+    }
+    let Some(room) = width.checked_sub(1) else {
+        return String::new();
+    };
+    let mut cut = take_columns(text, room);
+    cut.push('…');
+    cut
+}
+
+/// A tool call: what ran and on what, then how it went on the line under it.
+/// Two lines rather than one because the second is where its output goes, and
+/// a result that hangs off the end of the first line is easy to miss.
+pub fn tool(name: &str, argument: &str, outcome: &str, failed: bool) {
+    let mark = if failed { red("●") } else { green("●") };
+    let call = if argument.is_empty() {
+        bold(name)
+    } else {
+        format!("{}{}", bold(name), dim(&format!("({argument})")))
+    };
+    out(&format!("{GUTTER}{mark} {call}"), true);
+    let tail = if failed { red(outcome) } else { dim(outcome) };
+    out(&format!("{PAD}{} {tail}", dim("⎿")), true);
+}
+
+/// A tool's output under its line: held, its first rows shown and the
+/// rest folded under them for a click or ctrl+o to show; printed, its
+/// first lines.
+pub fn output(text: &str) {
+    if crate::screen::held() {
+        crate::screen::output(text);
+    } else {
+        detail(text, 12);
+    }
+}
+
+/// The indented body of a tool result, clipped so a big file does not bury
+/// the conversation.
+pub fn detail(text: &str, max_lines: usize) {
+    let total = text.lines().count();
+    for line in text.lines().take(max_lines) {
+        out(&format!("{PAD}  {}", dim(line)), true);
+    }
+    if total > max_lines {
+        out(
+            &format!(
+                "{PAD}  {}",
+                dim(&format!("… {} more lines", total - max_lines))
+            ),
+            true,
+        );
+    }
+}
+
+/// Lines shown under each notice, as many as under a tool's output: enough
+/// for a failing test's summary, where a helper's report of a page would
+/// bury the conversation.
+const NOTICE_LINES: usize = 12;
+
+/// Notices drawn dim with a mark of their own, one for each thing that
+/// happened meanwhile, since the model reads them as the user's turn but
+/// neither side said them.
+pub fn notice(text: &str) {
+    blank();
+    let mut body = String::new();
+    // The first line is the header telling the model what a notice is not,
+    // which the mark says here. Each notice after it opens with a dash, and
+    // the lines it brought are indented under it.
+    for line in text.lines().skip(1) {
+        let Some(first) = line.strip_prefix("- ") else {
+            body.push_str(line.strip_prefix("    ").unwrap_or(line));
+            body.push('\n');
+            continue;
+        };
+        detail(&std::mem::take(&mut body), NOTICE_LINES);
+        said(&dim("◆"), &dim(first));
+    }
+    detail(&body, NOTICE_LINES);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fit, fold, visible};
+
+    #[test]
+    fn colour_takes_no_room() {
+        assert_eq!(visible("hello"), 5);
+        assert_eq!(visible("\x1b[1mhello\x1b[0m"), 5);
+    }
+
+    #[test]
+    fn fitting_keeps_to_one_row_of_the_width() {
+        assert_eq!(fit("one\ntwo", 20), "one two");
+        assert_eq!(fit("abcdef", 4), "abc…");
+        assert_eq!(fit("abcd", 4), "abcd");
+        assert_eq!(fit("abcd", 0), "");
+    }
+
+    #[test]
+    fn lines_break_between_words() {
+        assert_eq!(fold("one two three", 7), vec!["one two", "three"]);
+        // Nothing to break on: the row is filled rather than left short.
+        assert_eq!(fold("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(fold("short", 40), vec!["short"]);
+    }
+
+    #[test]
+    fn the_rest_of_a_line_hangs_under_its_first_word() {
+        // The bullet opens the line; what wraps sits under the words, not
+        // under the bullet.
+        assert_eq!(fold("● one two three", 9), vec!["● one two", "  three"]);
+        // Indented text keeps its indent when it wraps.
+        assert_eq!(fold("    aaa bbb", 8), vec!["    aaa", "    bbb"]);
+        // A list marker hangs the same way.
+        assert_eq!(fold("- one two", 7), vec!["- one", "  two"]);
+        // A bare number is not a marker.
+        assert_eq!(fold("17 times 23", 8), vec!["17 times", "23"]);
+    }
+
+    #[test]
+    fn a_break_carries_the_colour_over() {
+        let rows = fold("\x1b[1mone two three", 7);
+        assert_eq!(rows.len(), 2);
+        // The escape stays with the first row and costs it no width.
+        assert!(rows[0].starts_with('\x1b'));
+        assert_eq!(visible(&rows[0]), 7);
+    }
+
+    #[test]
+    fn wide_characters_take_two_columns() {
+        assert_eq!(super::visible("日本語"), 6);
+        assert_eq!(super::visible("ok ✅"), 5);
+        assert_eq!(
+            super::fold("日本語のテキスト", 6),
+            ["日本語", "のテキ", "スト"]
+        );
+        assert_eq!(super::clip("日本語テキスト", 7), "日本語…");
+        assert_eq!(super::fit("日本語テキスト", 4), "日…");
+        assert_eq!(super::char_at("日本語", 3), 1);
+        assert_eq!(super::plain(&super::mark("日本語", 2, Some(4))), "日本語");
+    }
+
+    #[test]
+    fn text_from_outside_cannot_drive_the_terminal() {
+        let carried = "a\x1b]0;evil\x07b \x1b[31mred\x1b[0m\x1b[?1049l\x1b[2J c\x1b]52;c;Zm9v\x1b\\\tdone\r\x07";
+        assert_eq!(super::safe(carried), "ab \x1b[31mred\x1b[0m c    done");
+        assert_eq!(super::safe("line one\nline two"), "line one\nline two");
+    }
+
+    #[test]
+    fn an_escape_split_between_pieces_of_a_reply_is_taken_out_whole() {
+        assert_eq!(super::open_escape("text \x1b]0;HI"), ("text ", "\x1b]0;HI"));
+        assert_eq!(super::open_escape("a \x1b[2"), ("a ", "\x1b[2"));
+        assert_eq!(super::open_escape("a \x1b[2Jb"), ("a \x1b[2Jb", ""));
+        let mut stream = super::Stream::default();
+        stream.push("say \x1b]0;HI");
+        assert_eq!(stream.half_escape, "\x1b]0;HI");
+        stream.push("JACKED\x07 done");
+        assert!(stream.half_escape.is_empty());
+    }
+
+    #[test]
+    fn an_escape_that_never_ends_holds_back_no_more_than_a_line() {
+        let shown = |out: &str| super::plain(&super::safe(out));
+        let mut stream = super::Stream::default();
+        let mut out = String::new();
+        stream.piece(&mut out, "say \x1b]0;never");
+        assert_eq!(stream.half_escape, "\x1b]0;never");
+        // The line ends with the escape still open: it was never one.
+        stream.piece(&mut out, " ended\nthe rest");
+        assert!(stream.half_escape.is_empty());
+        assert!(shown(&out).contains("]0;never ended"), "{out:?}");
+        assert!(shown(&out).contains("the rest"), "{out:?}");
+        // Nor does one held without a line's end grow past its cap.
+        let mut stream = super::Stream::default();
+        let mut out = String::new();
+        stream.piece(&mut out, "\x1b]");
+        for _ in 0..200 {
+            stream.piece(&mut out, "word ");
+        }
+        assert!(stream.half_escape.len() <= super::HALF_ESCAPE_MOST);
+        assert!(shown(&out).contains("word word"), "{out:?}");
+        // What is still held when the reply ends is not dropped.
+        let mut stream = super::Stream::default();
+        stream.push("tail \x1b]0;open");
+        stream.end();
+        assert!(stream.half_escape.is_empty());
+    }
+
+    #[test]
+    fn a_fenced_block_is_drawn_without_its_fences_and_as_code() {
+        let mut stream = super::Stream::default();
+        let mut out = String::new();
+        let reply = "Here it is:\n```rust\nlet x = **y** * `z`;\n```\nDone **now**.\n";
+        for ch in reply.chars() {
+            stream.take(&mut out, ch);
+        }
+        let shown = super::plain(&out);
+        assert!(!shown.contains("```"), "{shown}");
+        assert!(shown.contains("    rust\n"), "{shown}");
+        assert!(shown.contains("let x = **y** * `z`;"), "{shown}");
+        assert!(shown.contains("Done now."), "{shown}");
+    }
+
+    #[test]
+    fn a_heading_loses_its_marks() {
+        let mut stream = super::Stream::default();
+        let mut out = String::new();
+        for ch in "## What changed\n#include <x>\n".chars() {
+            stream.take(&mut out, ch);
+        }
+        let shown = super::plain(&out);
+        assert!(shown.contains("What changed\n"), "{shown}");
+        assert!(!shown.contains("## "), "{shown}");
+        assert!(shown.contains("#include <x>"), "{shown}");
+    }
+
+    #[test]
+    fn a_style_broken_over_rows_starts_each_row_again() {
+        let rows = super::fold("\x1b[1mbold words that wrap around\x1b[0m after", 10);
+        assert!(rows.len() > 2, "{rows:?}");
+        assert!(rows[1].starts_with("\x1b[1m"), "{rows:?}");
+        assert!(!rows.last().unwrap().starts_with("\x1b[1m"), "{rows:?}");
+    }
+}

@@ -1,0 +1,294 @@
+name: Release
+
+# A v* tag builds every platform into a draft release, and stops there. The
+# draft reaches nobody: it is signed and published by hand with
+# `scripts/release.ps1 sign <tag>`, on the machine that holds the key every
+# copy of Vythea trusts. A workflow or an account that is taken over can
+# build a draft, but cannot ship it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A binary that calls itself another version than its release would be
+      # offered as an update over and over.
+      - name: The tag is the version in Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME is not v$version, the version in Cargo.toml"
+            exit 1
+          fi
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+            exe: .exe
+          # 22.04, not latest: a binary built there runs on the older glibc
+          # most distributions still ship.
+          - os: ubuntu-22.04
+            target: linux-x64
+            exe: ""
+          - os: macos-15
+            target: macos-arm64
+            exe: ""
+    runs-on: ${{ matrix.os }}
+    # Code signing runs where its secrets are set, and is skipped where they
+    # are not: the build is then unsigned, as before, and Windows SmartScreen
+    # and macOS Gatekeeper warn about it.
+    env:
+      SIGN_WINDOWS: ${{ secrets.AZURE_CLIENT_ID != '' }}
+      SIGN_MACOS: ${{ secrets.MACOS_CERTIFICATE != '' }}
+    steps:
+      # Third-party actions are pinned to a commit, not a tag that can move.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake pkg-config libssl-dev libzstd-dev \
+            libfontconfig-dev libfreetype-dev libwayland-dev libx11-xcb-dev \
+            libxkbcommon-x11-dev libvulkan1 libasound2-dev
+
+      - name: Locate fxc.exe
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # Azure Artifact Signing (formerly Trusted Signing): the certificate
+      # lives in Azure and never reaches the runner. Signed before packaging,
+      # so the zip and the bare binaries carry the same signed files.
+      - name: Sign (Windows)
+        if: runner.os == 'Windows' && env.SIGN_WINDOWS == 'true'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+          files: |
+            ${{ github.workspace }}\target\release\vythea.exe
+            ${{ github.workspace }}\target\release\vythea-gui.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # The Developer ID certificate goes into a keychain of this run's own,
+      # which bundle-macos.sh then signs with (MACOS_SIGN_IDENTITY).
+      - name: Signing identity (macOS)
+        if: runner.os == 'macOS' && env.SIGN_MACOS == 'true'
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          pass=$(openssl rand -hex 16)
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          [ -n "$identity" ] || { echo "::error::no Developer ID Application identity in MACOS_CERTIFICATE"; exit 1; }
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      # What the updater asks each new binary before it is swapped in.
+      - name: Both binaries say the tag's version
+        shell: bash
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          for bin in vythea vythea-gui; do
+            said=$(./target/release/$bin${{ matrix.exe }} --version | awk '{print $NF}')
+            if [ "$said" != "$want" ]; then
+              echo "::error::$bin says $said, not $want"
+              exit 1
+            fi
+          done
+
+      # The archives are what the install scripts unpack; the bare binaries
+      # are what the updater downloads.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          # Both halves: the terminal, which runs setup, and the window it
+          # installs. The install scripts expect to find both in here.
+          Compress-Archive -Path target\release\vythea.exe, target\release\vythea-gui.exe, LICENSE, README.md `
+            -DestinationPath dist\vythea-windows-x64.zip
+          Copy-Item target\release\vythea.exe dist\vythea-windows-x64.exe
+          Copy-Item target\release\vythea-gui.exe dist\vythea-gui-windows-x64.exe
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -czf dist/vythea-linux-x64.tar.gz \
+            -C target/release vythea vythea-gui -C ../.. LICENSE README.md
+          cp target/release/vythea dist/vythea-linux-x64
+          cp target/release/vythea-gui dist/vythea-gui-linux-x64
+
+      # The app is a disk image to drag into Applications; the terminal is the
+      # bare binary.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          scripts/bundle-macos.sh --dmg
+          mkdir -p dist
+          cp target/vythea-macos-arm64-*.dmg dist/vythea-macos-arm64.dmg
+          cp target/release/vythea dist/vythea-macos-arm64
+          if [ -n "${MACOS_SIGN_IDENTITY-}" ]; then
+            codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" dist/vythea-macos-arm64
+          fi
+
+      # Apple checks the signed app and vouches for it; the ticket is stapled
+      # to the disk image, so Gatekeeper opens it without going online. The
+      # bare terminal binary is signed only: Apple cannot staple a lone file.
+      - name: Notarize (macOS)
+        if: runner.os == 'macOS' && env.SIGN_MACOS == 'true'
+        env:
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          echo "$API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool submit dist/vythea-macos-arm64.dmg \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$API_KEY_ID" --issuer "$API_ISSUER" --wait
+          rm "$RUNNER_TEMP/notary.p8"
+          xcrun stapler staple dist/vythea-macos-arm64.dmg
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vythea-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The terminal alone, linked statically against musl: a file that needs no
+  # C library from the system, so it starts where the glibc 2.35 build above
+  # cannot -- an older distribution, Alpine, the slim images benchmark tasks
+  # run in. The window stays out: its graphics libraries come from the
+  # system. Each processor builds on its own runner, because Ubuntu's
+  # musl-gcc, which ring and QuickJS are compiled with, only makes code for
+  # the processor it runs on.
+  static:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: linux-x64-musl
+            triple: x86_64-unknown-linux-musl
+          - os: ubuntu-22.04-arm
+            target: linux-arm64-musl
+            triple: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: stable
+          targets: ${{ matrix.triple }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: musl C compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      # Named outright: for aarch64 the cc crate would look for
+      # aarch64-linux-musl-gcc, which Ubuntu does not ship.
+      - name: Build
+        env:
+          TARGET_CC: musl-gcc
+        run: cargo build --release --locked -p vythea-cli --target ${{ matrix.triple }}
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.triple }}/release/vythea dist/vythea-${{ matrix.target }}
+
+      # What makes it static, checked: it starts on a glibc older than the
+      # one the other Linux build needs, and on a system with no glibc.
+      - name: It says the tag's version on Debian 11 and on Alpine
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          for image in debian:bullseye-slim alpine:3.22; do
+            said=$(docker run --rm -v "$PWD/dist:/dist:ro" "$image" \
+              /dist/vythea-${{ matrix.target }} --version | awk '{print $NF}')
+            if [ "$said" != "$want" ]; then
+              echo "::error::vythea-${{ matrix.target }} says '$said' on $image, not $want"
+              exit 1
+            fi
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vythea-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft:
+    needs: [build, static]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      # A draft is invisible to the account API, which only serves published
+      # releases, and a run that is repeated replaces the draft's files.
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files="dist/* scripts/install.ps1 scripts/install.sh"
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != "true" ]; then
+              echo "::error::$GITHUB_REF_NAME is already published"
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" $files --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" $files --draft --verify-tag \
+              --title "Vythea ${GITHUB_REF_NAME#v}" \
+              --notes "Built by CI. Sign and publish with: scripts/release.ps1 sign $GITHUB_REF_NAME"
+          fi

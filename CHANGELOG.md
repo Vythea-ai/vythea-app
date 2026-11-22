@@ -1,0 +1,545 @@
+# Changelog
+
+Every change to Vythea — the app, the terminal, on Windows, macOS and Linux —
+by version, newest first. One version number covers all of them.
+
+Versions follow [semantic versioning](https://semver.org): `0.x` until the first
+stable release, `-alpha.N` / `-beta.N` while it is early. Changes gather under
+**Unreleased** and become a version when it is tagged (`vX.Y.Z`), which builds
+the release for every platform. Each line starts with where it applies:
+**App**, **Terminal**, **Windows**, **macOS**, **Linux**, or **All**.
+
+This file is also the App tab of https://vythea.com/changelog.
+
+## [Unreleased]
+
+## [0.1.0-alpha.5.1] - 2026-11-11
+
+### Added
+- **All** — An MCP server's own tools can act on what that server said, once you list them. `actOnOwnReplies` in a server's entry in `mcp.json` names the tools let past the prompt-injection guard while that server wrote everything the session has read from outside, so a run nobody watches can, say, act on a quote its own server just gave. Read anything else in the session, a web page or another server's reply, and those calls are held as before. Only your own entry can set it, never a plugin's. See docs/extending.md, which says to leave out tools that send money or data to an address.
+- **macOS** — `curl -fsSL https://vythea.com/install.sh | sh` installs Vythea on a Mac: the app in Applications and the terminal on your PATH, then opens it, with no "Apple could not verify" warning to click through. An open Vythea keeps running while its copy is swapped, and one macOS won't let go of is left whole, with what to allow.
+
+### Fixed
+- **All** — In the window and the terminal the model finds the tools left out of each request, the scheduler, the browser, helpers and background jobs, when it searches for them. Before, it found none and told you to add a scheduled job by hand.
+- **All** — A program a Python plugin starts no longer gets the pipe Vythea's messages come in on, so it can neither read them away nor sit waiting on it. On Windows, `git` started from a plugin's tool, as the git-status and test-gate examples do, no longer hangs.
+- **All** — A file a request says to leave unchanged is kept even when its path has a `~` inside a folder's name, such as Windows' short form `C:\Users\RUNNER~1\…`. Only a `~` at the start of a word is read as the home folder.
+- **Windows** — The local endpoint ends each reply's connection itself, so a client is no longer left waiting, then reset, when a program started at that moment holds a copy of the connection.
+
+## [0.1.0-alpha.5] - 2026-11-05
+
+### Added
+- **All** — A provider takes more than one account: a second ChatGPT or Claude plan, or another OpenAI, Anthropic, Gemini, xAI, OpenRouter or OpenCode Go/Zen key, each named (ChatGPT · Work) and listed under its provider in Settings › Accounts with Add another account, and in `/connect`. When an account reaches its limit, the same model goes on on your next account of that provider first, which Settings › Accounts › When one runs out can turn off, and a full plan is passed over until it resets: "Switched to ChatGPT · Work: ChatGPT reached its limit. It is back at 14:20." The model menu and `/model` list a model once for all of a provider's accounts.
+- **All** — Plan usage: each window of a ChatGPT, Claude or OpenCode Go plan (5-hour, weekly, monthly, a model's own) with how much is left and when it resets, from its replies and its own usage page. Settings › Accounts draws a bar for each and Check now asks again; `/limits` lists them in the terminal.
+- **All** — OpenCode Go/Zen, one gateway for an OpenCode key: the open coding models of your Go plan go to Go, and every other model OpenCode serves goes to Zen, pay-as-you-go from your OpenCode balance. A key with no Go plan uses Zen alone. Each model goes out in the format its side serves it in (chat completions, Messages, Responses or Google's own), at the address OpenCode gives that format, with the session header OpenCode asks every client for. Every request now names Vythea as its client.
+- **All** — Google's own format, `generateContent`: Gemini on OpenCode Go/Zen, which is served in no other, with its thinking shown as it streams and its thought signatures sent back with each tool call, as Gemini 3 requires. A Custom gateway whose base ends in `/v1beta`, such as Google's own API, is spoken to the same way.
+- **App** — Settings › Accounts fits on about one screen: the accounts connected come first, one line each with the plan window nearest its limit, and a click opens one in place, shaded and in line with its name, for every window, its key or sign-out, and Use first on the same row as its other buttons. Providers not set up are tiles in a grid as wide as the list, under Add an account, each opening a panel of the same shape, and the fallback order and the local endpoint are folded under More options.
+- **Terminal** — `/connect` signs in to ChatGPT or Claude with a code on another device, for a terminal reached over SSH: ChatGPT's own code typed on OpenAI's page, or Claude's page's code pasted back.
+- **All** — A paired phone lists this computer's accounts with how much of each plan is left, adds a key or a sign-in, orders them and turns the switch to the next account on or off, over the encrypted link its chats use. Keys only go to the computer; no answer carries one.
+- **All** — A plugin can run code with nothing to build: a plugin.json whose `main` is a JavaScript file runs it on Vythea's own engine, sandboxed, and one whose `main` is a Python file runs it on the Python already on the computer. Its code can add tools for the model, look at a tool call before it runs and block it or note on it (never let through what the approval gate stopped), follow turns as they start and end, add slash commands that run code, and keep settings. It runs only once you allow it, you are asked again when an update changes its code, and nothing starts until it is used. See docs/plugins.md, and the guard and git-status examples.
+- **App** — A plugin's status shows as a chip in the status bar, its panel as a tab beside the chat drawn with the window's own widgets, and its notices as the window's; its settings are on the Plugins page, and its commands and panel in the command palette.
+- **Terminal** — A plugin's status shows in the footer and its notices at the prompt; `/plugins` says what a plugin's code runs and brings, `/plugins settings` and `/plugins set` show and change its settings, and `/plugins reload` starts it afresh.
+- **All** — A plugin's code can send the model back when its work is not done (`turn.stop`, as a Stop hook does), add context for the model to read with each message (`prompt.submit`), hear calls that failed (`tool.failed`) and how long each call took, and measure each request's tokens and cost (`model.reply`) and what a whole turn used (`turn.end`). Two more examples: `test-gate` runs your tests when the model says it is done and sends it back until they pass, and `session-meter` shows what each turn used and speaks up when a call keeps failing the same way.
+- **All** — Models that run on this computer, with no internet and nothing sent anywhere: Ternary Bonsai 2 (4B, 9B, 27B), Gemma 4 E4B, Qwen3.5 9B, Qwen3.8 27B, Qwen3.6 35B-A3B and Qwen3-Coder-Next, run by llama.cpp's server, which is downloaded with the first one and checked by its hash. Each says before it is downloaded whether it runs well here and about how fast, and the one that suits this computer best is marked. Bonsai 2 4B and 9B may search the web while online; the others chat.
+- **All** — When Vythea or another gateway cannot be reached, a downloaded model answers instead and says so ("Switched to Ternary Bonsai 2 · 4B on this computer: Vythea could not be reached"). It can be turned off in Settings › On this computer.
+- **App** — Settings › On this computer: what this computer has, every model with its verdict, and Get, a progress ring with Pause, Resume and Cancel, Use, Delete, Show in Finder or Explorer, and photo reading to add or remove. The model menu lists the models downloaded, under On this computer, and first-run setup offers the suggested one.
+- **App** — Every model in Settings › On this computer links to the Hugging Face page its file comes from. Add from Hugging Face, under the list, takes a pasted link (a model's page, a file's link, `owner/model` or `owner/model:Q4_K_M`), lists the repository's GGUF files with how each would run here, suggests a 4-bit one, and downloads the one picked, pinned to the commit it was read at and checked by its size and SHA-256 like Vythea's own. A vision file beside it becomes its photo reading. Models added this way chat without web search, are marked "Added from a link", and come off the list when deleted.
+- **App** — Each web search shows as a card above the answer, for every model: "Searching the web" while it runs, then "Searched the web · 5 results" with the query, and a click lists the pages, each opening in the browser.
+- **Terminal** — A model downloaded to this computer is in `/model`, and `vythea --gateway "This computer" --model bonsai-2-4b` runs one; it says when it is loading, or waiting for another chat.
+- **App** — Use this computer from the Vythea app on your phone, encrypted end to end. Messaging › Vythea app pairs a phone with a QR code and six digits to compare, and lists the phones paired. A phone's chats are sessions on this computer, in Default or Plan mode, and each call that needs a yes asks on the phone. Vythea's servers pass the messages on without being able to read them, and nothing on this computer listens on the network. Turn on Over Tailscale there and a phone on the same tailnet pairs and connects straight to this computer instead, which still works when Vythea's servers cannot be reached; only the tailnet address is listened on, port 47821.
+- **All** — A commit a session writes ends with `Co-authored-by: Vythea`, and a pull request it writes with Vythea's mark, as Vythea Cloud's sessions already do. Settings › Privacy › Commits and pull requests turns it off for this computer, and, signed in, for Vythea Cloud, which is your account's choice and the same switch as the phone app's.
+- **Terminal** — `-p --output stream-json` prints a `step` line as each tool call ends: the tool, what it worked on, whether it worked, and a few lines of what it gave back, or for a change to a file the file, the lines added and taken away and its diff. Vythea Cloud passes these on, so the phone lists a run's steps as it goes.
+- **Terminal** — `/local` and `vythea local` list the models that run on this computer, each with how it runs here, how far its download has got and the Hugging Face page it comes from. `get <id>` downloads one, `add <link>` adds one from a Hugging Face link (offering its files to pick from at a keyboard) and downloads it, and `pause`, `resume`, `cancel` and `remove` steer them. In a session a download goes on in the background and says when the model is ready; `vythea local get` and `add` wait for it, showing how far it has got.
+- **Terminal** — A `-p --background` run with `--output stream-json` says on its stream when it stops for a yes: an `ask` line with the session, the call, the tool, what it would do and why it asks, and an `answered` line once the answer file is read, so whatever started the run (Vythea Cloud for the phone) can show the question and write the answer.
+- **App** — Effort sits at the foot of the model menu (Auto, Low, Med, High, XHigh, Max, as the model has them), and the model's name shows the level only when one is set. `/effort` opens it, and `/effort max`, `/effort extra high` or `/effort auto` sets one straight away. The mode, Crew and Web switches in the chat box show only their icon while at their default and name themselves when on.
+- **Terminal** — Alt+P picks the model and Alt+T the effort without losing what is in the box: the draft is set aside while the picker runs and comes back after. Pressed while a reply runs, the picker opens when it ends.
+- **All** — A command running in the foreground can be sent to the background and goes on as a job. In the terminal the waiting line ends with `ctrl+b runs it in the background · esc stops it` (`ctrl+b twice` inside tmux), and it works for a `!` line too.
+- **All** — A rule kept by "Always allow" can be taken back. `/permissions` in the terminal lists the kept rules, allowed, asked first and denied, each with where it holds, and picking one removes it. Settings › Permissions in the window shows the same rules with a button to remove each.
+- **Terminal** — `/tools` switches Vythea's own tool families (Files, Commands, Web, Browser, Media, Messaging, a plugin's) on or off, as the window's Capabilities › Tools page does, with how many of each are off and what each still needs. `/tools on|off <family>` switches one by name.
+- **All** — `/redo` puts back what the last `/undo` or `/rewind` took back: the messages, pictures included, and the files as the agent had left them. A file changed since the restore is left alone and named.
+- **App** — The terminal's everyday commands work when typed in the window: `/model`, `/mode`, `/plan`, `/compact`, `/rewind`, `/retry`, `/copy`, `/branch` and the rest do what their menus and buttons do, where before they went to the model as text.
+- **App** — A line starting with `!` runs as a command in the session's folder, as in the terminal, and its output goes into the chat for the model to see. Esc stops it.
+- **App** — Dropping a file or folder on the chat puts it in the box as an `@` reference, so it is attached when sent. A dropped picture is still attached as a picture.
+- **App** — Cmd+F (Ctrl+F on Windows), or Find in this chat in the palette, finds words in the open chat, with a count ("2 of 5") and arrows to step between matches.
+- **App** — Cmd+= and Cmd+- make the window's text larger or smaller, from 70% to 160%, and Cmd+0 puts it back. The size is kept.
+- **All** — A session carries on from the window to the terminal and back. Continue this session in the terminal, in the palette, opens your terminal in its folder running `vythea --resume <id>`, and `/window` in the terminal opens the session on screen in the window.
+- **Terminal** — `--name` names the session a run starts or picks up, and `--fork-session` with `--continue` or `--resume <id>` carries on in a copy, leaving the original as it was.
+- **Terminal** — `--system-prompt` and `--append-system-prompt` (and their `-file` forms) replace Vythea's own instructions with yours, or add yours after them, for that run. The project's instructions, skills and tool rules are kept either way.
+- **Terminal** — `/terminal-setup` names the terminal you are in, says which keys make a new line there, and gives the exact setting for Shift+Enter and Option or Alt where they do not work yet.
+- **Terminal** — Ctrl+Z hands the screen back to the shell, and `fg` brings the session back as it was.
+- **Terminal** — While a turn runs, terminals that draw progress in the tab (Windows Terminal, ConEmu, Ghostty, iTerm2) show a running bar there.
+- **Terminal** — A copy says so with a green check and how much was taken ("copied 35 characters"), then the footer comes back after four seconds. Ctrl+V takes any picture on the clipboard, such as one copied in Preview or Safari, and a file copied in Finder.
+- **Terminal** — The queued line says how to send it now or take it back (`ctrl+s sends now · ↑ edits it`), and `/help` and the `?` card list every key the box answers to, Ctrl+R and Ctrl+L included.
+- **Terminal** — `/vim` gives the box vim's keys: normal and insert mode shown in the footer, motions, `d c y` with counts, text objects, `p`, `J` and `u`.
+- **Terminal** — `/theme` picks the terminal's colours, with themes for dark and light backgrounds and ones that tell an added line from a removed one by more than red and green. The default looks as it did, and the choice is kept.
+- **Terminal** — `/statusline <command>` shows your own status line under the footer. The command is handed the session as JSON in the same shape as Claude Code's `statusLine`, so a script written for it works here.
+- **Terminal** — Keys can be moved in `keybindings.json`, which `/keybindings` opens: each key maps to an action, a `/command`, or nothing to unbind it.
+- **All** — A recap of where a session stands, in two or three short lines: what was asked, what was done and what is left. `/recap` asks for one in the terminal and the window, and a session picked up more than 30 minutes after its last reply gets one unasked.
+- **All** — More hooks in hooks.json run: `PostToolUseFailure` after a call that failed, `SubagentStop` when a helper finishes, `PreCompact` before a session is summarized, and `SessionStart` and `UserPromptSubmit` at a turn's start, which can add context or turn a prompt back. `/hooks` in the terminal lists the hooks the file holds.
+- **All** — A project can have its own formatter run on every file the model writes (rustfmt, prettier, black, gofmt and others, as the project sets up), so edits come out in the project's layout. `/format` in the terminal and "Format edits in this project" in Settings › Thinking switch it on.
+- **All** — Language servers can check a project's edits with one switch: `/lsp` in the terminal and "Check edits with language servers" in Settings › Thinking find the servers this computer has for the project's languages and set them up, after asking.
+- **All** — `/review` takes a GitHub pull request by its number or link, fetching it without touching your checkout, and posts nothing to it without a yes.
+- **Terminal** — `vythea --bg "task"` works on with the terminal closed, and `/background` sends the session there. `vythea attach <id>` watches it and answers what it asks, and `vythea stop <id>` ends it. The window sends nothing into a session working in the background and says how to reach it.
+- **All** — `/ide` links the terminal to VS Code: a selection sent with Cmd+Alt+K (Ctrl+Alt+K elsewhere) lands in the box as `@file#L10-20`, and a change the model asks to make opens there as a diff beside the question. A terminal started inside VS Code links by itself.
+- **All** — A Vythea extension for VS Code: Open in terminal, Add selection to chat and Add file to chat, from the command palette and the editor's and Explorer's menus.
+- **All** — A session can work in folders beside its project: `--add-dir <folder>` and `/add-dir <folder>` in the terminal, and Add folder… in the project folder's menu in the window. Added folders last until the run or the window ends.
+- **Terminal** — `-p --output stream-json` prints `text` and `thinking` lines with each reply's words and thinking as they are written, so Vythea Cloud and the phone show them as they come rather than all at the end.
+
+### Changed
+- **App** — A message longer than a line takes the whole width of the chat box with the controls under it, where it used to be squeezed into half the box.
+- **All** — A run writing a big file in one call says what it is writing, or that it is thinking, while the reply still streams, and its output count takes in what has streamed so far, where it used to look frozen for minutes.
+
+### Fixed
+- **All** — Updates install on their own: releases trust Vythea's signing key and an offline backup, where until now a release build had no key and refused every update. Copies from before this release need one download by hand.
+- **All** — Each model call stopped reading the accounts and gateways files thousands of times: a missing accounts file is remembered as missing, a list of gateways reads the file once rather than once a provider, and each file is looked at no more than every quarter second (a change from this window or terminal is seen at once, one from the other within that). A busy computer running many agents spends about a third of the time it did between calls.
+- **Windows** — A note an editor that crashed left behind is passed over when linking the terminal to an editor, as on macOS and Linux.
+- **All** — Moving an account up or down twice in quick succession could leave the list showing the order from before the second move, as the accounts file was read again only when its time or size changed.
+- **macOS** — The Keychain asks once, not again after every update or build, and not separately in the terminal and the window.
+- **Terminal** — Switching to another tab of the terminal and back could leave the conversation blank; coming back into focus now draws everything again.
+- **All** — A session with no project works in `~/Vythea Sessions` when `~/Vythea` already holds a git checkout, where before it could only read and a paired phone was refused.
+- **All** — In auto mode a check or a test may make scratch files in the system's temp folder, and on a run nobody watches a hold after several refused calls lifts again, so the run is not refused everything for the rest of its work.
+- **All** — A timed run nobody watches keeps retrying at its own pace when a gateway asks it to wait an hour, rather than ending at once.
+- **All** — Requests that leave tools to be found on demand no longer send an empty `tool_calls` field, which some gateways rejected outright.
+- **All** — A gateway whose model list gives no context sizes, such as OpenCode Go's, takes them from the public models.dev catalogue, so a model with a long context gets it rather than 64,000 tokens.
+- **App** — A `!` command stopped with Esc no longer stops Esc from working on the next one started while it was ending.
+
+## [0.1.0-alpha.4.2] - 2026-10-20
+
+### Added
+- **App** — A click on the tray icon on Windows, or the menu bar icon on macOS, opens its menu rather than only the window: Open Vythea, a new session, any of the six sessions used last (with "needs you", "working" or "new" beside one that waits), quick entry, Settings, updates, the Activity page while something runs, and Quit. The Windows menu says the account, credit and model at the top, as the Mac's does; a double-click on the Windows icon opens the window.
+- **App** — Select several sessions in the sidebar with Cmd-click (Ctrl-click on Windows and Linux), Shift-click or Select in a session's menu, then pin, unpin, delete, name again or export them as Markdown together, from the bar over the list, its `…`, or a right-click on one of them. Deleting asks once. With the sidebar focused, Space, Shift+↑/↓, Cmd+A, P, Delete and Esc work on the selection.
+
+### Changed
+- **App** — Shift-click on a session selects a range, as in any list, instead of pinning it.
+
+### Fixed
+- **macOS** — Closing the window keeps Vythea running in the Dock and the menu bar instead of quitting it. Open Vythea in the menu bar menu, the Dock icon or a notification brings the window back out of the Dock and in front, showing at once what was opened from the menu. Quit in the menu bar menu, or Cmd+Q, ends it.
+
+## [0.1.0-alpha.4.1] - 2026-10-20
+
+### Added
+- **App** — A session's menu (rename, pin, export, delete) opens from a right-click, a two-finger or Control-click on a Mac, a long press, or the "…" that shows on the row under the pointer; on a Mac, Backspace and Cmd+Backspace delete the selected session too.
+
+### Changed
+- **All** — On a Free plan with no credit, Vythea's hosted models are greyed out and cannot be picked or sent to, under an Upgrade subscription button that opens checkout, rather than a send that failed and opened Settings. The window's picker, palette and first-run step, and the terminal's `/model`, list them last as needing a subscription; the terminal says so at start and in its footer, holds back a message that would be refused, and points to `/model` for a gateway that is ready. A plan bought on the website is seen without a restart.
+- **All** — On a Free plan with no credit, the hosted models Vythea makes free today stay open: listed as usual with "Free today" in the window and "(free today)" in the terminal's `/model`, and sent to as any other. One whose daily allowance is used up is greyed out with the rest until 00:00 UTC, and says so when picked or sent to; a hosted refusal for want of credit or a plan asks the account again, so it greys at once. Add credit opens the credit checkout, and Upgrade subscription the Pro plan's.
+- **All** — A failed hosted reply on a Free plan offers Upgrade subscription, which opens checkout instead of Settings, with Choose a model beside it when another gateway is set up; Sign in is kept for an account that is not on this computer.
+- **All** — Model lists follow a gateway as soon as it is added, changed or removed, in Settings or with `/connect`: the window follows what the terminal saves and the other way round, and which accounts serve a model is asked again rather than kept until a restart.
+
+### Fixed
+- **All** — A request on Vythea falls to a gateway of your own when the account turns it away or is out of credit, even on the Free plan: every ready account is reached, those after the session's tier in "When one runs out" first, then the earlier ones, with gateways of your own counted as API keys, and the default model on another gateway asked last. A gateway that cannot be reached hands on too. When every model fails, the session's own failure is shown, not a fallback's credit error, and the switch notice names both gateways.
+- **All** — A retry says what the provider said, in the terminal, the window and the log (`model_retry`, with the error masked and kept to 500 characters), where it said only "trying again". A failure keeps its cause: a connection that could not be made or broke off says why, a reply that is no JSON adds its words or its page's title, and an error is read wherever its server put the words: the usual `error.message`, a bare string, FastAPI's `detail` and its list of what failed validation, `msg`, OAuth's `error_description`, Cloudflare's `errors`, or, in no field known, the error as it came. The window wraps those words instead of cutting them to one line.
+- **All** — A gateway answering a server error that says its own upstream credit balance is spent, as one relaying Anthropic's refusal of its account did with a 503, is not waited out: it is not tried again for minutes, the request hands on to another account, and its words are shown. It stays the gateway's error, so neither Add credit nor Upgrade subscription is offered for it, as Vythea's own pool relays its spent credit this way too.
+- **Terminal** — `vythea -p` says each retry, with what the provider said, and each switch to another model on stderr, where it was silent until it gave up and never said another gateway answered.
+- **App** — Deleting a session works while another session replies, finds the session by its id rather than its place in the list, and says why when it cannot, as a notice rather than in a chat that may not be on screen.
+
+## [0.1.0-alpha.4] - 2026-10-20
+
+### Added
+- **Terminal** — Ctrl+V attaches the picture on the clipboard to your next message, read with what the system already has (AppleScript on macOS, PowerShell on Windows, wl-paste or xclip on Linux), and a picture dragged into the terminal is attached rather than pasted as its path, quoted, escaped or as a file:// address; both go through `/image`.
+- **Terminal** — What you send at the prompt is kept for each project folder across sessions (`prompt-history.jsonl` in the data folder), so ↑ in a new session reaches yesterday's prompts, and Ctrl+R opens them in a list narrowed as you type, newest first. A recalled paste comes back whole instead of as its placeholder, a recalled `/command` no longer traps ↑ in the menu, and changes to a recalled line survive stepping past it; an answer to a question, such as a key, is never brought back by ↑.
+- **Terminal** — Ctrl+G opens what is in the box in your editor (`$VISUAL`, then `$EDITOR`) and puts what you wrote back in the box when you close it. Ctrl+_ undoes the last change to the line, a word or a run of deletes at a time, and Ctrl+Y puts back what Ctrl+U, Ctrl+K or Ctrl+W last cut.
+- **Terminal** — A session is named by a model once its first reply is in, from the first message and the start of the reply: automatically Vythea's quick model, which its server picks, for a chat on the Vythea gateway, checked by Jev, else the side model, else the chat's own; `/model names` picks another or turns naming off, and `/rename` names a session yourself, or with nothing after it asks a model now. A chat on your own key, a company's gateway or a model on this computer is named on its own gateway, never sent elsewhere.
+- **Terminal** — A line starting with `!` runs as a command in the session's folder, as in a shell, without asking since you typed it; what it prints shows as a tool's output does, Esc stops it, and the model is told what was run and what came of it with the next prompt. Typed while it works, such a line waits for the turn to end, as commands do. The footer says where it will run while you type it.
+- **Terminal** — `?` on an empty line shows the keys over the box until the next key. `/help` lists the commands under headings (sessions, model, modes, tools, memory, background work, account) with every row cut to the window, lists every key, and `/help <command>` says what one does and the words the menu knows for it. While a command's words are typed, the footer keeps what it does.
+- **Terminal** — The box's bottom edge says how full the session's context is once there is a reply, from what the latest request carried, as the window's status bar does: quiet while there is room, amber from 70%, pointing to `/compact` from 85% and red from 90%. `/context` shows what fills it, part by part: the system prompt, tools, MCP, memory, skills and the conversation.
+- **Terminal** — The box's top edge names the session and where its folder stands in git (branch, what is changed, how far from upstream), and the window's title leads with the session's name, turns while it works and says "waiting for you" while a card or question waits; the title the terminal had comes back on leaving where the terminal keeps one. Names taken from a prompt's first lines show on one line there and in `/resume`.
+- **Terminal** — `/rewind`, `/undo` or Esc twice on an empty box lists every message you sent, newest first and narrowed by typing, and going back to one asks whether to restore the code and the conversation, the conversation alone or the code alone, or to summarize up to it or branch from it there; `/undo` no longer only takes back the last exchange. Putting the code back alone tells the model which files went back, and a rewind further back still puts them back to how they were first.
+- **All** — A Claude subscription is a provider you sign in to, beside the Anthropic API key: the models your plan includes, no key to paste.
+- **All** — A Custom endpoint that names the Messages route, such as a proxy's `https://proxy.example/v1/messages`, works: it is spoken to in Anthropic's Messages API, as Anthropic's own is, with prompt caching, effort and thinking. It used to be sent chat completions under that route, which no such proxy answers. Its models are asked for at the API's root, as Messages takes the key, so a turn learns the model's window and efforts and setup's check and the model list find them; the same goes for Anthropic's own address pasted with the route. Such a proxy is not taken for Anthropic itself: a cache marker it refuses is dropped for it as for any other gateway, and a subscription token goes to it as a bearer, without the marks of Anthropic's own client and the signed-in account's ids they carry.
+- **All** — A built-in wallet the agent pays from: make one or bring one in from MetaMask, Phantom or any wallet app, on Base, Ethereum, Solana and any EVM chain. Sites that ask to be paid (x402) are paid in USDC within caps you set, asked each time or on their own below a price you choose; sends always ask. `vythea wallet`, `/wallet`, the Wallet page and Settings › Wallet.
+- **Web** — A terminal in the browser: the Cloud page opens Vythea itself, running in Vythea Cloud on a new thread or one you have, to type into as on your own computer.
+- **Terminal** — On a machine that is thrown away after (`VYTHEA_DISPOSABLE=1`, as in Vythea Cloud), the terminal takes its server, key and model from `AGENT_BASE_URL`, `AGENT_API_KEY` and `AGENT_MODEL`, as `-p` does, and saves none of it.
+- **Web** — Vythea Cloud takes more servers: admins add a VPS from the admin page with one setup command, and runs and 24/7 bots spread across every server.
+- **Web** — vythea.com shows Vythea Cloud on the home page and has a Cloud page in the docs; phone apps for iPhone and Android are marked coming soon.
+- **All** — A shorter README, and a full guide in `docs/`: install, the app and terminal, gateways, tools, extending, the cloud, configuration, data, architecture, building and benchmarks.
+- **All** — `vythea -p --output json` says which window the run's requests were sized by and where it came from (`"window": {"tokens", "source"}`), and names the model the run used, also when the environment or `--model` chose it.
+- **All** — With no search service chosen, search_web searches through the session's gateway where it sells search, Vythea's from the account's credit or a gateway's cheapest search model, and falls back to DuckDuckGo in the same search when the gateway cannot answer; a gateway that could not answer rests for ten minutes, with DuckDuckGo asked first meanwhile, the approval card names every place the query may go and who pays, auto mode leaves a paid search to the user, and a chosen service is still the only one used, DuckDuckGo chosen alone included.
+- **All** — write_file can make a new file in the system's temp folder, such as a script that reproduces a bug, and write_file and edit_file can change one the session made there, so scratch work stays out of the project; another program's file there, or one in a folder the session did not make, is still refused, and a command that writes a new file there no longer counts as writing outside the project in a session that read a page.
+- **All** — A run nobody watches that goes twelve rounds without changing the project is asked, on the end of that round's last result, to say in one line what it has established, its hypothesis and its next step, keeping on reading being a fine answer; again after twenty-four and thirty-six, the last saying to finish if it cannot name a step, and no more than three times a turn. Only an edit that went through starts the count again, never a command. `VYTHEA_PROGRESS_NOTE_ROUNDS` sets the rounds, with 0 for never, and `vythea -p --output json` reports `progress_notes`, `first_edit_round` and `rounds_after_last_edit`.
+- **All** — `vythea -p --output json` says what the cache did over the run: `cache_misses` counts the replies the provider served fewer cached tokens than the one before though nothing sent had changed, with the tokens they lost, drops too small for `/usage` to name included, and `history_rewrites` counts the misses an earlier message changing caused, so a run's cache figures can be read net of the provider's own drops.
+- **All** — A `reasoning_replay` setting, or `VYTHEA_REASONING_REPLAY` for one run, set to `chunked` sends DeepSeek and Kimi an empty `reasoning_content` with the turn's older tool calls once their reasoning comes to 8,000 tokens, and then a chunk of that at a time, so the requests in between keep the provider's prompt cache; the newest two calls always carry theirs, the calls before results already cleared go without it in the same rewrite, `/usage` and `vythea -p --output json` count a move of the cut as an earlier message changing, and a route that refuses the empty one is sent every call's reasoning instead, across turns, before the field is given up on. The default, `full`, sends every call of the turn its own, as before.
+- **App** — Rewind to here asks whether to restore the code and the conversation, the conversation alone or the code alone, from any message, with the lines each file changed; Escape twice in an empty composer, or the palette's Go back to an earlier message, steps to your last message to rewind from, and up and down step to the others.
+- **Linux** — Where commands get fewer CPUs than the machine has, as in a container held to a CPU quota, commands and jobs start with `OMP_THREAD_LIMIT`, `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` set to the CPUs they get, unless the user set one of them or another thread-pool size already, and the system prompt says how many they get and names the four when it set them, as `OMP_THREAD_LIMIT` caps even a count a command sets itself. Where the counts match, the prompt and the commands are as before; the log's `machine` event gives both counts.
+- **App** — A session is named by a model once its first reply is in, from the first message and the start of the reply: automatically Vythea's quick model, which its server picks, for a chat on the Vythea gateway, checked by Jev, else the side model, else the chat's own; a chat on your own key, a company's gateway or a model on this computer is named on its own gateway. Settings › Model › Session names switches it off or picks the chat's own model or one of your own, and Name it again in a session's menu asks for a new name; a name you gave is never replaced.
+
+### Changed
+- **Terminal** — The screen sends only the rows that changed since the last frame, inside a synchronized update where the terminal knows it, so a streamed reply sends about a third of what it did and flickers less over ssh and on a console; the pointer moving over the window is no longer read or drawn for, and a frame no longer copies the whole conversation.
+- **Terminal** — A tool's output shows its first twelve rows, counted on screen so one long line cannot fill it, and the rest folds under them: a click or Ctrl+O shows it all and folds it again. An edit that goes ahead without asking shows its diff after it, as one asked about shows it before, and a changed line longer than the window goes on under itself in a diff instead of being cut at the edge.
+- **Terminal** — A reply's fenced code shows as code: the fences go, the language is named dimly over it, the code is coloured as diffs are, and `**` or backticks in it stay as written. Headings show bold without their `#`s, a bold or coloured run wrapped over rows stays so on each, a reply that opens with bold keeps it, and a resumed session's replies are drawn the same way.
+- **Terminal** — `/clear` starts fresh in a new session on a clean screen, as in Claude Code, with the session left behind in `/resume`; Ctrl+L clears the screen, which is what `/clear` did. `/status` shows on one screen the version, the session and its file, the folder and where it stands in git, the model, the mode, the account, how full the context is and the MCP servers, and `/export [file]` writes the conversation as Markdown, by default to a file in the project named after the session, never over one that is there.
+- **Terminal** — A turn's clock runs from its start: the waiting line counts the whole turn rather than starting again at each step, the footer keeps it going after the answer starts streaming, and the caption under the last reply ends with how long the turn took. The waiting line's word changes from one wait to the next, a long command is cut so the time stays in view, and every footer hint is cut to the window instead of wrapping in a narrow pane.
+- **Terminal** — Shift+Tab steps through asks first, edits without asking, plan only and auto decides (and bypass once chosen), never onto "allowed calls only", which refuses whatever would ask and stays with `/mode dont-ask`; Alt+M steps too, and each mode says in the footer for a moment what it lets run. The terminal starts in the window's default mode when no flag picks one, a mode switched while it works holds from its next tool call, and `/plan` takes on or off and goes back to the mode it was turned on from.
+- **Terminal** — Ctrl+C stops a reply and stays, where it stopped it and left with the conversation; it turns a card or a list down and skips a question as Esc does, clears what is typed, and leaves only when pressed twice on an empty box. A line cleared with Esc comes back with ↑, though never an answer to a question or a secret, and Esc stops a reply in one press after a drag-copy.
+- **All** — A folder write_file or apply_patch created for a file counts as the session's own, so a session that read a page may delete it without asking, like the files it made, as long as nothing in it was there before it or is a link.
+- **All** — A model whose window nothing gives is sized as if it held 64,000 tokens when its server takes a key, as a gateway or a LiteLLM proxy does, instead of the smallest window, so old tool results are cleared far later; a server without a key, such as Ollama, keeps the small window, and `VYTHEA_CONTEXT_WINDOW` sets it for a keyed proxy in front of a small local model.
+- **All** — Old tool results are cleared only once a request comes near its budget, and then in chunks of half the window rather than every eight results, so the provider's prompt cache keeps serving the requests in between; results under 600 characters are never cleared, and a cleared one reads as cleared from history, with the call to repeat, rather than to save room.
+- **All** — While the provider's prompt cache serves the session, the window holds up to four times the default cap: once the newest three replies' usage says at least half of their input came from the cache, a model whose window holds twice the cap keeps its history and its old tool results up to 256,000 tokens, or three quarters of its window if that is less, since a miss on everything after a cleared result costs more than the tokens it saves. The places the window can start, the chunks results are cleared in and the share of a tool result sent stay as under the cap, so nothing moves to a new place; a run of misses, an overflow, a route whose usage never counts the cache and a `context_cap` the user set keep the cap, and once the cache serves the session again the window and the cleared results stay where the cap left them rather than moving back. The 4,000 tokens kept free for subfolders' instruction files are kept only once a result has touched a folder that has one.
+- **All** — `/usage` names a cache miss that cleared results or reasoning no longer sent back caused as "an earlier message changed", and says of one where nothing Vythea sends changed that the provider served it without the cache.
+- **All** — web_fetch and search_web say why a request got no answer, such as a name that could not be looked up or a connection turned down, and once one to the web could not connect, other than one a page redirected to, both answer at once that they are unavailable for now, naming the host and why, rather than each trying and waiting to fail: for two minutes in a session someone watches and for the rest of a run nobody does, unless a request to the web gets through; pages on this computer or the local network are still fetched.
+- **All** — `vythea -p` sends about 600 fewer tokens of tools and prompt with every request: the helpers' and the background jobs' lists are found through find_tools like the other less used tools, and nothing it is sent names what such a run lacks: helpers in the background, wake_me, list_sessions and /resume, or Vythea's own skill on using Vythea, whose index and skill tool go too when no other skill is on.
+- **All** — A run nobody watches, such as `vythea -p`, is told the commands on PATH and what its project folder held at the head of its first message rather than in the system prompt, so runs in folders that hold different things send the same system prompt and tools, and a provider's prompt cache serves them across runs; sessions someone watches are unchanged.
+- **All** — Claude models reached over chat completions through any gateway, such as a LiteLLM or Portkey proxy or a company's own, not only OpenRouter and the hosted gateway, mark where Anthropic's prompt cache ends, so each new message is written to the cache once and read from it on the next request instead of paid in full first. A route that turns the request down as bad (400 or 422), in whatever words, is sent it again once without the markers, while the requests beside it keep theirs; if that one is answered, that gateway and model go without them for the rest of the run, if it is turned down too the markers were not at fault and stay, and if it is stopped or never answered nothing is decided.
+- **All** — The system prompt's rule on checking a change now says to run the check nearest it first, the reproduction and the one test file that covers the changed code, once, and then not to re-run, re-read or diff what passed, and to name a failure the change did not cause rather than prove it pre-existing; a new rule says a bug reported through one example is fixed at the cause its other inputs and entry points share, and what to do when a report does not reproduce as described; and the rule on making calls in one reply names commands and checks alongside reads and searches. A run nobody watches is also told that, with nobody to ask, the task text and the project folder are what it has, so it decides from them rather than searching the computer or the network for what was meant. The new rows are `shared-cause` and `scope-of-task` to `VYTHEA_PROMPT_RULES`.
+- **All** — A call that brings back what an earlier one in the turn brought is told so on the end of its result ("Same result as round 3"), past the spellings that change nothing: a command with its spacing, a `cd` into the project, `2>&1`, `| cat` or a `| head -N` or `| tail -N` changed, a read of the same file starting within the same fifty lines, a search in another case, and a result that differs only in its commit ids, addresses, dates, timings or seeds. A third such result gets the note that already said to change approach, which now counts these too; a run nobody watches is still stopped only by the call spelled the same way five times. Only an edit that went through starts the count again, and a call turned down or made twice in one reply is not counted.
+- **All** — When a call that runs on its own, such as an edit or a command, fails, the calls the same reply queued behind it are answered "Not run: an earlier call in this reply failed; resend it if still wanted" rather than run, so a check sent along with an edit never reads as if it had checked the edit that did not land. A command that ran and exited with a code is no failure here, so two suites sent together each report their own; reads and searches run at once and a miss among them stops nothing, nor does a memory save that fails, as one to a full page does, nor a call the user, the gate or a stop kept from running, such as a save the user did not ask for or a call to a tool there is not.
+- **All** — read_file says what a page holds (about 7k characters, with `limit` left out) and that reads of several files or regions go in one reply; search says the same of several patterns or folders, and run_command of independent commands, each with its own exit code. Where calls run one at a time, those clauses go as the batching rule does. read_file names its kinds of file in a few words, search no longer spends a sentence on when documents are searched, and search_web's note on snippets is shorter.
+- **All** — A run nobody watches, such as `vythea -p`, is told to remove what it made only to test from its outputs' folders before it ends, unless the task asks for it or the project's own build keeps it there, and to write only the answer, in the form asked, to a file meant for one; that leaving inputs alone and not deleting data hold for its own steps, not for what a program it was asked to write should do, which may run on more than the sample in hand; to get a result through the library or tool the task names, calling it correctly when a call fails rather than going around it; and to try a helper that transforms data on a tiny input whose answer it knows, then check the final output with separate code.
+- **All** — A command moved to the background at its time limit names stop_job beside wait and read_job, for a job no longer needed.
+- **All** — A run nobody watches, such as `vythea -p`, that changed no source but made or changed a file its request names, such as `out.csv`, by any tool or command, is now sent back once to check it against the requirements its request states, as one that changed source is, worded for the file: to check what it holds now with a short new script that reads only it and the task's inputs and reuses none of the code that made it, since a mistake there agrees with itself. A review helper it starts for that check, here or after a change to source, is asked to work out what it checks with code of its own too. Only the paths and file names in the request are looked up, never the whole folder.
+- **All** — At 80% of `VYTHEA_DEADLINE` a run is told to remove scratch files, logs and binaries it made only to test from its outputs' folders, unless the project's build keeps them there, before it improves its outputs; so is one whose reply is stopped past that point for thinking too long, and one that begins past it, as a later turn over stdin can.
+- **All** — run_command no longer reads as if every command ran in a sandbox: its `unsandboxed` option says a command ran in one only when its result has a line starting `(ran sandboxed`, and to use it after such a run failed for the network or a write outside the project, or when an error says the command cannot be sandboxed, so a run whose commands are not confined, such as `vythea -p --yes`, no longer takes an install or a write outside the project to be refused without trying it. What the sandbox and approvals allow is unchanged.
+- **All** — In a run nobody watches, such as `vythea -p`, a schedule or a chat app, auto mode's judge is waited for up to a minute rather than 20 seconds, and may write up to 8,192 tokens with its thinking rather than 2,112, fewer on a model known to take fewer, so a model that thinks at length reaches a verdict instead of having the call refused, or put to the chat, for want of an answer; sessions someone watches keep 20 seconds, the judge still refuses or asks when it cannot answer, and it is never waited for past a run's `VYTHEA_DEADLINE`.
+- **All** — A run nobody watches, such as `vythea -p`, is told that even opening a file with a program can change it, as sqlite3 can fold a database's write-ahead log into it or delete the log on closing, and, before running such a program on an input it is to recover data from or repair, to copy the input with the files that go with it and try the program on the copy first. On Terminal-Bench 2.0, three runs lost a database's log that way before copying it.
+- **All** — A run nobody may be watching, such as `vythea -p`, a schedule or a chat app's, drops a reply with no tool call that goes round on the same few words for 2,000 characters or more, writing almost no line or sentence in its later half it had not written already, or that is still empty after it was asked once to say something, and sends the same request again after a rest of 2, 4 and then 8 seconds, three times a round at most, rather than taking the filler as its answer, carrying it in every later request, or ending on the empty reply. Data that brings a new line every few lines, such as a log, a table or most JSON lists of records, is kept; a long run of lines all alike, such as a grid of zeros, may be asked for again up to three times before the fourth is kept. A reply that spent the run's budget is kept. A dropped reply's tokens still count in the run's token totals and its budget, though not in the cost it reports, as an empty reply's never did. The app shows a chat app's run saying so when a reply it showed is dropped; turns typed in the app or the terminal, and an editor's over ACP, are unchanged.
+- **All** — A run nobody watches, such as `vythea -p`, that ends with a path its request names still not there, such as `src/run.js` or `/srv/app/report.pdf`, is sent back once to weigh it against the request, in the same check that names a missing output under `out/`, unless it can neither write files nor run commands. A path counts, whatever its kind, when it was not there as the run began and is in the project or its folder is there as the run ends. Only one written with its folder counts, not a name alone; not one in an example, in code or a diff, a placeholder, such as `<name>` or `YYYY-MM-DD`, a URL, or one with a line or port after it, such as `src/app.js:42`; not what a command the request shows writes, such as the file after `-o` or `>`; nor one in a sentence about reading, removing or moving files, or saying not to make it, to make it later or that it is optional or not needed.
+- **All** — On a run given `VYTHEA_DEADLINE`, the reply in place of one stopped for thinking without writing anything goes on from that thinking, which comes with the notice to write now, trimmed to its start and end when long; the reply asks for low effort, or the nearest the model offers, never more than the run was set to, and the run's own effort comes back with the next reply. A run on automatic effort whose model was not thinking, such as one on Anthropic's API that thinks only when asked, is not asked for an effort, which there would start it thinking for the rest of the run. The notice says whether the reply reached its output limit or thought past its share of the time left; before, it said it was stopped for thinking either way, and the next reply planned again from nothing.
+- **All** — On a run with a deadline, such as `vythea -p` given `VYTHEA_DEADLINE`, a command given longer than the default two minutes carries on in the background, with its output so far, once it has had half of the time left, and two minutes at least, or once past two minutes as soon as a notice such as a background job's exit is waiting, so the model hears it now rather than after the command's own limit. Nothing is stopped; runs with no deadline, helpers and sandboxed commands wait as before.
+
+### Fixed
+
+- **Terminal** — Chinese, Japanese and Korean text and emoji take the two columns they fill, so replies wrap whole instead of losing the end of every row, and the box, the queued lines, the lists and a selection line up with them. A reply, a file or a command's output can no longer drive the terminal: only colour and style get through, so text carrying sequences that retitle the window, write the clipboard, move the cursor or leave the conversation's screen shows as text without them, even when a reply's sequence is split between the pieces it streams in. Tabs show as four spaces.
+- **All** — The wallet keeps working when a public RPC refuses it: each built-in network has other free RPCs it moves on to when its own rations, refuses or cannot be reached, starting next time with the one that answered; an address you set is still the only one used. A Solana token's balance is read from the account wallets keep it in, which every RPC serves, where it searched the owner's accounts, which Solana's public RPC rations and other free ones refuse, so USDC there read as none and x402 payments in it failed. A token whose balance could not be read is listed with why, and a price is said to be unpayable because the balance could not be read, not because the wallet holds too little.
+- **Terminal** — `/thinking`, `/search`, `/search keyless`, `/notify`, `/voice`, `/verify` and `/memory-review` take on or off, where any word flipped them, so `/notify off` could turn notifications on; alone they still switch. Enter on a name more than one command starts with, such as `/u`, fills in the first of them rather than running it, `/effort` with a word that is no level says which levels there are instead of switching to auto, `/mcp` with a word that is none of its own says so instead of asking which server, an unknown command says how to send it as text, and `/jobs` heads finished jobs as finished.
+- **Terminal** — A session first named after a message of several lines no longer has a line break in its name, as the window's never had.
+- **All** — A value after `Authorization:` or `Proxy-Authorization:` is hidden again in tool output and logs, as it was before names were read word by word.
+- **All** — A run that read untrusted words may delete only a real crash dump it left (an ELF core, or the JVM's pid-named files), not a project file named like one, such as `app.core`.
+- **All** — A job told how to keep a server up past a `-p` run is told to start it in a plain command, not as another job, which the run would stop with it.
+- **Linux**, **macOS** — Commands, jobs, hooks and checks start with Ctrl-C and Ctrl-\\ at their defaults, sandboxed ones included, so one can be interrupted on purpose, as with `kill -INT` or `^C` sent to a terminal job, even when Vythea was started with both ignored, as a script's `cmd &` starts it. Before, Python run that way raised no `KeyboardInterrupt`. A Ctrl-C at Vythea's own terminal still never reaches them, and Vythea itself still keeps an ignore it was started with.
+- **All** — A run nobody watches, such as `vythea -p`, that was sent back for open items on its checklist and then changed them, ticking, adding or beginning one, is sent back again with what is still open when it would end, unless it was already sent back for that same list, so a run that leaves them as they were, or changes them back, still ends. Before, it was sent back once a run, so one sent back early, on a reply before its last, could later end with items open and hear nothing.
+- **All** — A request a gateway turns down as too big (HTTP 413), as one carrying a few large pictures can be, goes again at once with its oldest pictures left out until it is under the limit the refusal names, or a quarter smaller when it names none, each with a line saying that reading its file again shows it, or for the newest that a smaller copy may fit. A 413 for too many tokens a minute, as Groq sends, through OpenRouter too, is not taken for one. The gateway's limit holds for its later requests in the run, and only a request with no picture left to leave out is cut down as an overflow is, where before the one resend still carried every picture, was refused the same way and ended the turn.
+- **All** — A tool's result that saved a picture a request no longer carries says so, where before it still said the picture follows: a request sends only the 4 newest, and the result now says to keep what is needed from a picture while it is sent; once a model turns pictures down, each such result says what the picture is and how else to look into it, as an attached one does. Browse's older screenshots, left out by design, say nothing, and the session keeps every result as it was.
+- **All** — read_file scales a picture down to 1,568 pixels on its long side whenever it is longer, as attaching one does, rather than only when the file is too big to send.
+- **All** — An error a gateway sends inside a reply it has already begun to stream, such as "every lender we tried refused this request (HTTP 502)" after two minutes of keep-alives, is tried again as the provider's own trouble, and then handed to a fallback model if one is set and none of the reply was shown yet, rather than ending the run as a failure nothing explained. A status its words name is read as the reply's own would be, so a 429 is waited out, a 408 is tried again, a 413 is taken for a request too long for the window and another 4xx ends the turn as a bad request, unless it is one that would blame the key, the credit or the base URL, which the gateway has just accepted. An error whose code or type is the provider's own word on the request, such as a refused prompt or an `invalid_request_error`, still ends the turn as before, as does one that gives its status in a field, as TGI's does.
+- **All** — `vythea -p --input-format stream-json` keeps to `VYTHEA_DEADLINE` as a `-p` question does, counted from the run's start: at 80% the turn running is told to write its outputs, at the deadline it stops with a result line whose status is `deadline`, and a message sent after that is not run. Before, a run driven over stdin, as Harbor drives one, ran on until the harness killed it, with no result line.
+- **All** — A run nobody watches is told never to look online for a copy of its task, its tests or its answer. Since the scope rule was reworded on 11 October, nothing said so, and on Terminal-Bench 2.0 six of 89 runs searched for their own task, three of them downloading its published solution or tests and running them.
+- **Terminal** — A session resumed with `-c` or `-r` shows its conversation at once, where it stayed off the screen until a key was pressed, and shows the whole of it, up to its last thousand messages, where it showed the last twelve with no way back to the rest; a replayed tool call names what it ran on, as a live one does. `/undo` and `/retry` redraw the same way.
+- **Terminal** — Commands work in the open session's folder rather than the one Vythea started in, so after `--worktree`, or with a session from another project resumed, `/where`, `/memory`, `/skills`, `/help`, `/undo`, `/retry`, `/image`, `/preview`, the `/` menu and your own commands read and change that session's files. `/new` from a session in a worktree of its own gives the new one a worktree too, made from the same checkout, where it used to start in the checkout the worktree was there to spare.
+- **All** — `/goal stop`, `/goal off` and `/goal cancel` end the goal as `/goal clear` does, where they set a goal of that one word to work towards.
+- **Terminal** — Leaving says which session it was and how to come back to it (`Saved "…" · vythea -r 16`), on the screen the terminal is given back. A SIGTERM or a closing terminal ends the session as leaving does, with the terminal given back and jobs and worktrees seen to, where it left the terminal in raw mode on the conversation's screen; a crash leaves the conversation's screen and the mouse before its message, so the message stays readable, and a caught panic in a tool's thread no longer turns raw mode off under the box. `NO_COLOR` takes the colours away and keeps the box, where it turned the box off.
+- **Terminal** — An approval card or a question from the model that comes up while you type no longer takes your keys: letters go on into the box behind it, an Enter pressed while you are still typing sends your line rather than a yes, and a digit no longer picks "always allow". A line sent while it worked never answers a question asked after it, a secret one included; Esc at the model's own question stops there, and a tall card keeps its choices on screen.
+- **Terminal** — A message typed with `//` to start it with a slash is sent as words again by `/retry`, and comes back to the box that way, rather than being run as a command.
+- **All** — `vythea -p --input-format stream-json` given `VYTHEA_DEADLINE` is told in its first request how long it has, and a reply that only thinks past its share of the time left is stopped with a notice to write its outputs now, as a `-p` question is.
+- **All** — In `vythea -p`, `--input-format stream-json` included, a command started in the background, or moved there at its time limit, is told that the run stops its background jobs when it ends, and to start one that must keep running after it detached instead, as with `setsid nohup` (`nohup` on macOS, `Start-Process` on Windows), and check that it answers. Before, a server started as a job was reported running and then stopped with the run. The jobs are still stopped; the terminal and the app, whose jobs run on after a turn, are unchanged.
+- **All** — A run given `VYTHEA_DEADLINE` hears its 80% warning even while a command or a wait holds it: the call comes back then, a command still running carrying on as a job with its output so far, and the warning counts the seconds left as the run reads it rather than as it came due. Past the warning, a call stops waiting shortly before the deadline, so the run sees what it printed before it is stopped; either way the result says the command is still running and offers wait or stop_job. Before, a run inside a long command read the warning only once the command was over, and at the deadline the command was ended unseen.
+- **All** — A tool call whose arguments end before the call is complete, with no output limit reached, tells the model that its output can end where it writes a special token such as `<|endoftext|>` whole and, if the content holds one, to build it from parts at run time, before the advice to send less in one call. Before, it was only told to send less, which cannot help a file that holds such a token.
+- **Terminal** — A line typed and entered while Vythea was starting is sent, where its enter used to be lost and the next words joined it. `\` then Enter and Ctrl+J start a new line everywhere, and Shift+Enter does too in terminals that can tell it from Enter (they are asked to); the opening screen and `/help` name the keys that work in yours. Option+arrows and Alt+B/F move a word instead of typing a letter, Alt+D and Alt+Backspace delete one, Ctrl+P/N step like the arrows, and AltGr types its character on Windows.
+- **Terminal** — Copying a selection reaches the clipboard in terminals that ignore the escape the terminal was asked with, such as Terminal.app and tmux, through the system's own clipboard command (pbcopy, clip, wl-copy, xclip or xsel), and the footer says "copied" only when that took it; over ssh it is left to the terminal, as the command would fill the far machine's clipboard. What is copied is the text as written: a line wrapped over several rows is one line again, without the indent or the mark in front of it. `/copy` copies the last reply as written, Markdown and all, and `/copy 2` the one before it.
+- **Terminal** — Scrolled back, the view stays on what you are reading while a reply streams under it, where every word pulled it to the bottom, or a fold closing under it moved it, and the footer counts how far back it is; sending a message or End goes back to the bottom. In a long prompt the caret sits where you type, on the wrapped row, the box shows the rows around it however long the prompt grows, and ↑ and ↓ move between wrapped rows before stepping through what you sent before. Chinese, Japanese, Korean and emoji take their two columns there, so their rows stay inside the box.
+- **All** — A model its gateway lists only under another vendor's path, such as `deepseek/deepseek-v4.1-flash` listed as `opencode-go/deepseek-v4.1-flash`, is sized by that listed window instead of the smallest one, so old tool results are no longer cleared after a few thousand tokens.
+- **All** — A web fetch or search that never reached its server, as when this computer is offline, no longer counts as having read a page, so a session that carries on from its own files is not asked about, or refused, its later deletes and sends; an error that quotes what a server wrote still counts, and the server's words in a failed secure connection, a redirect's address or a file's kind are now fenced as such.
+- **All** — On DeepSeek and Kimi, the reasoning sent back with the tool calls of the turn in progress counts toward the window, so a long turn clears old results before its requests outgrow the model.
+- **All** — A gateway that reports what its prompt cache wrote as `prompt_tokens_details.cache_creation_tokens`, as some that serve Claude over chat completions do, is read: a reply whose prompt the cache wrote counts it as input, written to the cache, instead of only the few tokens sent fresh, in the usage line, the window's fullness, `/usage` and `vythea -p --output json`.
+- **App** — Rewinding to your message puts its text back ahead of what you had typed instead of over it, and its pictures with it, and the composer takes the keys again; Rewind and Retry are off while a run holds the session, where they did nothing, and a rewind something started under says so.
+- **App** — Undo these and the Changes tab's Revert tell the model which files went back, so it reads them again before changing them, and a rewind further back still puts them back.
+- **All** — Command output, pages and MCP results no longer hide a line's value as a secret because its name merely holds a word such as key or token: a Python `KeyError: '...'` and any other error or warning keep their message, and lines such as `keyboard.drv=keyboard.drv`, `ssh-keygen: generating new host keys` and `smtpd_tls_key_file=/etc/ssl/private/x.key` are shown whole. A name one of whose words ends with key, token, secret, password, passwd, credential or auth, with or without an s, as `PGPASSWORD`, `API_KEYS` and `passWord` do, still has its value hidden, unless its last word is file, filename, path, dir, url, name or type, with or without an s.
+- **All** — web_fetch trusts the system's certificates as well as its own, read from `SSL_CERT_FILE` or `SSL_CERT_DIR` where either is set, so behind a network that re-signs HTTPS with its own authority it reads the pages curl and git read there instead of refusing every one as from an unknown issuer; a certificate there it cannot use is passed over. The gateway's connections keep to the built-in roots.
+
+## [0.1.0-alpha.3] - 2026-10-06
+
+### Highlights
+- **All** — Helpers that work side by side, fork, wait for more work and share a task list, plus workflows that run many agents from a script you approve.
+- **All** — Auto mode: a judge on your own model decides what would otherwise ask, and on macOS and Linux commands can run confined by the OS instead.
+- **All** — MCP servers over HTTP and OAuth, plugins from a git repository, and Zed or JetBrains running Vythea over ACP.
+- **App** — The browser opens beside the chat at half the room; long output rests as short previews; live work sits in one line over the box; Files, Changes and Jobs tabs, a Ctrl+K palette, and the whole window reachable from the keyboard.
+- **Chat apps** — Slack, pairing by code, files and voice notes both ways, and `vythea serve` to answer with no window open.
+- **All** — Runs nobody watches finish what they were asked: they keep going after cut-offs and empty replies, finish their checklist, read their inputs, check the files they were asked to make, and are told nobody can answer. `vythea -p` takes a deadline, a JSON Schema for its answer and its server from the environment.
+- **All** — Schedules in a mode of their own, memory you can review and edit, and a window that uses far less memory and processor while it works or sits idle.
+
+### Added
+- **All** — Vythea Cloud is asked for in the chat: say to run something there or keep a bot online 24/7, ask how it is doing, or to stop or restart it. `/cloud` is gone.
+- **Web** — A Cloud page on vythea.com shows what you host (bots and apps) with their output, Stop, Start, Restart and what each has cost, and the runs you sent.
+- **Web** — Usage shows what text, media and the cloud cost, thirty days day by day, each model's published price beside what you paid, and how much you saved.
+- **All** — Vythea Cloud runs bots and other always-on programs 24/7 when you ask for them to stay online: restarted if they stop, stopped after a crash loop or when credit runs out, billed by the hour. `vythea cloud apps`, `logs`, `down` and `up` manage them. Cloud compute now costs about $6 a GB-month, so a small bot online all month is about $0.75 of credit.
+- **All** — Vythea Cloud keeps apps running: a cloud run can leave any server (Next.js, a Rust API, anything on a port) at its own address; it wakes on a visit, sleeps after 10 minutes without one, and is billed only while awake. Threads unused for 14 days are cleaned up.
+- **All** — A cloud run that makes a page gives a private live link to it, served with nothing running; `vythea cloud relay on` has the cloud answer your Telegram chat while this computer is off; `vythea cloud support <run> on` lets support read a run, and each look is logged.
+- **Web** — Cloud admin at vythea.com/dashboard/admin, signed in with your account: the pool, running work, usage and the audit log.
+- **All** — The agent picks where to build what you ask: one self-contained page, chart or small app as a file you preview first, then the project on this computer, and Vythea Cloud only when this computer cannot (with your yes, as it spends credit).
+- **App** — Enter and Escape answer a card from the composer after a send; Tab moves past each switch once and Space turns it; Cmd+Q quits Vythea on macOS from anywhere in the window.
+- **All** — Vythea Cloud (Pro): `vythea cloud "task"` in the terminal and `/cloud <task>` in the window run a task on Vythea's servers, in a repository you name or none, and bring the answer back; a thread carries the work on, asleep on the server between messages. Billed from your credit.
+- **All** — `vythea doctor` checks the setup, and a local log and crash files help find out what went wrong.
+- **App** — The window wears vythea.com's colours; Settings choose its colours and whether it shows film grain.
+- **All** — Vythea knows each model's context window and output limit.
+- **All** — Helpers can answer in a checked shape.
+- **All** — The model knows today's date.
+- **All** — Send more while Vythea works: it reaches the model at the reply's next step, in the window and the terminal.
+- **All** — Helper types, built in and from your own files, share one token budget across a whole tree of helpers.
+- **All** — Helpers' conversations are kept beside their session, out of the session list.
+- **All** — See, steer and stop helpers at work, and answer their approvals, in the window and the terminal.
+- **All** — Fork a helper from the conversation, and ask something aside with `/btw`.
+- **All** — Kept helpers wait idle for more work and wake on a message.
+- **All** — A session's agents share a task list with owners and blockers.
+- **All** — Helpers can answer through a checked schema, even at their round limit.
+- **All** — Workflow runs keep a journal and replay what already finished.
+- **All** — Vythea keeps notes on each project in a memory of its own, which refuses keys and planted instructions.
+- **All** — `/init` has the model write the project's AGENTS.md, and AGENTS.md or CLAUDE.md can pull in other files with `@path`.
+- **All** — `/usage` adds up tokens and cost per session, day and model; the usage line says how full the model's window was.
+- **All** — Each session keeps its own model and effort.
+- **All** — Your own hook commands can block a call or keep a turn going.
+- **All** — The model sees pictures you attach and those its tools open.
+- **All** — MCP over HTTP; servers take variables, tool filters and their own start time, restart after they stop, and reload when mcp.json changes. `vythea mcp` adds them.
+- **All** — Many MCP tools are looked up on demand instead of sent with every request.
+- **All** — Any tool can be switched off, and tools that cannot work are not offered.
+- **Chat apps** — Talk to Vythea from Slack. A Telegram chat pairs by a code, and only its owner answers.
+- **Chat apps** — Whole, formatted replies with Allow/Deny buttons; files, photos and voice notes go both ways.
+- **Terminal** — Notices show and are taken mid-turn and between prompts; lines typed while it works show as queued and can be taken back.
+- **All** — Send now: a queued message goes in without waiting for the step.
+- **App** — Point mode in the browser panel: click a spot on the page, comment on it, and the reference goes in the composer.
+- **All** — Workflows: scripts run in a sandboxed JavaScript engine, Vythea can run one it wrote once you approve it, and Crew (`@crew` or a switch) opts a message into orchestration.
+- **All** — Helpers can work in a git worktree of their own.
+- **All** — `/loop` and `/heartbeat` keep one session going; a session can keep working toward a goal until a check says stop.
+- **All** — Run your own prompts and skills as slash commands, and let the model save, patch and undo skills it learned.
+- **All** — Attach files, line ranges and folders by typing `@path`; the composer offers commands after `/` and references after `@`.
+- **All** — Choose a reply style, or write your own.
+- **All** — Replies can be read aloud as they stream; voice input records to text at the cursor.
+- **All** — Pictures you attach can be edited through the chat's image gateway, and long video renders run as background jobs.
+- **All** — Computer use asks once for each app, on macOS and on Linux under X11.
+- **All** — The browser uploads project files, keeps downloads, saves a page as a PDF, shoots the whole page, hovers, drags, waits for words, acts in frames from other sites and runs steps in a batch.
+- **All** — Fetched pages keep their links, and a PDF is saved as a file; web searches can keep to some sites, skip others or stay recent.
+- **All** — MCP: read resources, run prompts as commands, sign in to servers that use OAuth, and tools get unique names and clean schemas.
+- **All** — Plugins bring skills and MCP servers from a git repository.
+- **All** — Other agents can use Vythea's browser and media tools over MCP, and Zed and JetBrains editors can run Vythea over ACP.
+- **All** — OpenAI models change several files in one patch and one yes.
+- **All** — New errors from a language server reach the model after edits, and a turn that changed files is asked once to build or test them.
+- **All** — A task carries on with a fallback model when its own fails.
+- **All** — A subfolder's AGENTS.md reaches the model when it works there.
+- **All** — `/insights` shows the last weeks by day, hour, tool and model; `/diff` shows what changed in the project and in this session.
+- **All** — Notifications call you back when a run ends or needs you.
+- **All** — Continue a Claude Code or Codex session, in the terminal or the window.
+- **All** — Memory makes several changes in one call, all or none.
+- **All** — Keys and tokens move to the Keychain or Credential Manager.
+- **Terminal** — Other programs can drive `vythea -p` over stdin as JSON lines, and `--mode accept-edits` edits inside the project.
+- **App** — Ctrl+K opens a palette of actions, pages, sessions and models, and a global shortcut opens a quick entry bar from anywhere.
+- **App** — Files and Changes tabs beside the chat: browse and preview the project, review and revert this session's edits, and stage, commit and push.
+- **App** — Capabilities gains Tools and MCP tabs with per-tool switches, and a Plugins page.
+- **App** — A first-run setup page, data-folder profiles, and sidebar filters for session state and project grouping.
+- **App** — HTML and SVG artifacts can be previewed, and a failed turn says why in the chat and offers the fix.
+- **App** — Set up Slack from the Messaging page and pair a member by code.
+- **All** — Auto mode: a judge on your own model decides what would otherwise ask, with a tag on each call and a list of its decisions (`/decisions` in the terminal, a Decisions list in the window).
+- **All** — On macOS and Linux, a command can run confined by the OS (no network, writes only in the project) instead of asking, in Accept edits and Auto.
+- **All** — Saved workflows become slash commands, and `/review` ships built in; watch, pause, stop, resume, skip and retry workflow runs and their agents, in the terminal and the window, and read one agent's transcript or a run's log.
+- **All** — Schedules run from core in whichever Vythea is open, never twice, each in a mode of its own; the model can add, list and remove them, and schedules, chat apps and `/bg` run beside the chat.
+- **All** — `vythea serve` answers the chat apps with no window open, and the window takes over from it.
+- **All** — Vythea can look back every 10 messages for what to remember; see and edit memory with `/memory` or the Memory page in Settings.
+- **All** — Summarize earlier turns on demand, now or up to a chosen turn.
+- **All** — Old sessions can be deleted after a number of days, and a rewind leaves nothing of what it took back in the file.
+- **All** — A command still running at its time limit keeps running as a background job.
+- **App** — Every part of the window can be reached from the keyboard; a run of tool calls folds into one line; a finished turn lists the files it changed; a Jobs tab shows background jobs live; a status-bar popover shows what fills the context.
+
+- **App** — The browser opens beside the chat at half the room, and can take it all; while the agent browses, the page shows small in the corner of the chat.
+- **App** — Long output rests as short previews: a command's last lines (a failed one in red, kept open), a file's first lines, an edit as +a −b with its diff, thinking as "Thought for 12s"; pictures open in the window's own viewer.
+- **App** — Helpers, workflow runs and jobs still working, and the plan's steps, sit in one line over the box; while the model writes a long call the reply says "Writing app.rs…".
+- **App** — Approval cards: Enter allows and Escape denies, and "2 of 3" shows when a reply asks about several calls.
+- **App** — The sidebar gives the sessions the room, with the other pages under More; Ctrl+Tab switches between recent sessions; the empty chat lists recent sessions.
+- **App** — Picking an image, speech or video model makes what you send with it.
+- **All** — When a site's check stops the agent, it waits while you get past it and carries on by itself.
+- **All** — The browser works on a site's own dropdowns, scrolls a panel by its ref, types into date, time, colour and range fields, names what a click hit, and waits for what a click set off before reading the page.
+- **Terminal** — Skills and MCP prompts no longer crowd the `/` menu: they come up as you type, and under `/skills` and `/mcp`.
+- **All** — A run nobody watches (`-p`, schedules, `/bg`, editors, chat apps) keeps going after a reply cut off or an empty one, is sent back once with checklist items still open, and checks the files its request asked for before it ends; `-p --output json` lists what is still wrong.
+- **All** — `run_command` takes a timeout of up to half an hour for slow builds and tests.
+- **App** — Previews open by themselves unless turned off.
+- **Terminal** — Lists are steered with the arrows, and Escape declines.
+- **All** — Harness-Bench scripts to score `vythea -p` and compare two builds task by task.
+- **Terminal** — `vythea -p --json-schema` asks for the answer as JSON the schema checks; `--output json` names the session, model and cost and counts refused calls.
+- **Terminal** — `VYTHEA_DEADLINE` warns a `-p` run to write its outputs at 80% of its time, then stops it; `AGENT_BASE_URL`, `AGENT_API_KEY` and `AGENT_MODEL` point a run at a server with nothing set up.
+- **Terminal** — `vythea --dump-config` prints the settings and limits a `-p` run would get.
+- **All** — `context_window` and `max_output` in settings, or `VYTHEA_CONTEXT_WINDOW` and `VYTHEA_MAX_OUTPUT`, give an unknown model its real limits; vLLM and Groq model lists set them too.
+- **All** — `run_command` takes a `workdir`, and runs in bash where bash is on PATH; a headless run's long command carries on in the background.
+- **All** — A schedule can run once at a date and time, and the model knows the computer's time zone.
+- **All** — The browser can type a key for each character, and a typed field is read back so a batch stops when the text did not stick.
+- **All** — A fetched page shows its forms with their hidden fields, and leaves out the words its markup hides.
+- **All** — Setting `parallel_tool_calls` to false runs one tool call at a time; a helper type's effort, background and isolation take effect.
+- **All** — `VYTHEA_ALLOW_HTTP=1` lets plain HTTP reach hosts on the local network; `VYTHEA_DISPOSABLE=1` lets an unwatched `--yes` run in a throwaway container delete a folder.
+- **All** — Vythea runs as a Harbor agent for Terminal-Bench and SWE-bench, and ClawBench and the A.I.G injection matrix can be run against it.
+- **All** — Releases carry a static terminal for x86_64 and aarch64 Linux.
+- **All** — A session can work in a git worktree of its own and apply its work back when done.
+- **All** — Scheduled runs can report by email, with the app password kept in the vault.
+- **All** — A side model in Settings makes summaries, commit suggestions and goal checks on something cheaper.
+- **All** — Memory changes can be listed and put back.
+- **All** — A folder's `.local` instructions file is read after its shared one.
+- **All** — Zed and JetBrains can reopen Vythea sessions and pick the model over ACP.
+- **All** — An Anthropic key connects directly to Anthropic's API, with prompt caching and thinking; OpenAI reasoning models keep their reasoning between tool rounds through the Responses API.
+- **All** — Memory: choose when a chat saves (only when asked, after a yes, or by itself) and where it keeps it (a project, the chat, or everywhere), from `--memory`, `--memory-scope`, `--private`, `/remember`, the window and chat apps.
+- **All** — `read_file` reads Word, Excel, PowerPoint and PDF files as text, and search can look inside documents.
+- **All** — A fresh install can search the web with DuckDuckGo, without a key.
+- **All** — A background job can be answered at its prompts with `send_job`.
+- **All** — Rewinding also undoes what a command changed in the project.
+- **All** — A wake-up outlives a restart and can be a day away; a schedule can stay quiet unless something changed.
+- **All** — A chat with no project works in Vythea's own folder.
+- **All** — An experimental script tool can run many read-only calls in one step.
+- **All** — Vythea has a built-in skill that explains its own commands and settings.
+- **All** — Core can send a card waiting in the window to the owner's DM in a chat app.
+- **All** — Editors over ACP can pick the agent's mode.
+- **All** — Hand work to Claude Code, or pick it as a model.
+- **All** — `read_file` reads OpenDocument text, spreadsheets and presentations, and EPUB books chapter by chapter; old .doc, .xls, .ppt and .rtf files say how to make them readable.
+- **App** — The window shows a card for typing into a background job, fires wake-ups too, and can switch off DuckDuckGo search when no key is set.
+- **App** — The Skills page can copy the built-in help skill to edit, and a memory row says where the entry went.
+- **All** — Questions name a recommended answer, and the terminal takes free-form ones.
+- **All** — Recurring tasks and notifications use Vythea's own schedules and chat apps first, with your yes.
+### Changed
+- **All** — Cloud runs show what they are doing as it happens: `vythea cloud` prints each step, and the window's `/cloud` shows the step under way, streamed over SSE (with polling if the stream drops). Apps in the cloud can stream to visitors (SSE) for as long as they like.
+- **All** — A cloud run uses its own short-lived token that only reaches the models, never your sign-in.
+- **All** — A failed model request says what went wrong: the key, credit, a rate limit, a busy provider, a conversation too long, and so on.
+- **All** — OpenAI's reasoning models work, and a server that turns down a field is sent the request again without it.
+- **All** — The context window counts tool calls, pictures and Chinese, Japanese and Korean text, so long conversations are trimmed where they should be.
+- **All** — Following up while Vythea works keeps the turn's original request in view.
+- **All** — The checklist stays in view, in the window and the terminal, even in a long task.
+- **All** — Approvals you give in one session stay in that session.
+- **All** — Tools accept other agents' argument names and quoted values, and `edit_file` finds text through different line endings and spacing.
+- **All** — Commands run with no pager or editor to wait on, and colour codes are kept out of what the model reads.
+- **App** — The approval card and tool lookups no longer reread files on every frame.
+- **App** — The example plugin starts switched off.
+- **All** — Batches of calls run at once.
+- **All** — Session search finds words in any order, in the sidebar and `/resume`; the terminal lists sessions without reading every file.
+- **All** — Earlier turns survive a failed summary, a summary survives a restart, and compacting shows.
+- **All** — A project folder inside a repository keeps the repository's rules.
+- **All** — Commands and MCP servers start with the login shell's variables.
+- **All** — Stopping an MCP call tells its server, and stopping a server ends everything it started.
+- **All** — Plan mode refuses tools that change things, however they are asked for.
+- **All** — Secret files such as `.env` and private keys stay out of the model's reach; `.env.example` does not.
+- **All** — Stop reaches waits and running commands, and ends them.
+- **All** — Long replies are no longer cut off at two minutes; only five minutes of silence ends one.
+- **All** — Unattended runs never stall waiting on a question.
+- **All** — Summaries reuse the chat connection, and a busy background job no longer copies its whole log on every read.
+- **All** — Runs without a window (`-p`, helpers, workflows) keep to deny rules and the safety floor, and a yes for the run no longer covers a worse call after it.
+- **All** — Unattended runs that repeat one call with the same result are stopped.
+- **All** — Helpers and workflow agents go through the whole gate, in their session's mode, with its rules, grants and judge.
+- **All** — Jobs are listed, waits match only new output, and a session sees only its own jobs.
+- **All** — A command printing past 4 MiB is saved whole for `read_file`.
+- **All** — Chat-app, web and media calls reuse one warm connection each; cache misses are named with the part that changed.
+- **All** — Inline think blocks stream as reasoning; `read_file` shows notebooks as cells.
+- **App** — The window reads a session in only when it is opened, follows what the terminal writes to sessions, and highlights eight languages instead of twenty-seven.
+- **App** — Session search skips sessions that cannot hold the words, and a reply that moves the window no longer waits for its summary.
+- **App** — The window uses far less memory: pictures are read no larger than shown and let go of after, sessions read in by runs, chat apps or the terminal are let go of too, and switching profile reads only the session it opens.
+- **Terminal** — The installed terminal is `vytheacli.exe`, with the logo; `vythea` still starts it.
+
+- **App** — The window uses far less processor: a running reply redraws at 25 frames a second, not 120; a hidden or minimized window and the tray stay quiet; the browser panel decodes only pictures it shows; the approval card and the model list are worked out once.
+- **App** — Selecting text no longer leaves 40–80 MB with the window, and video stills and a helper's transcript are let go of once not shown.
+- **App** — Night is calmer: a midnight frame around a dark ink page.
+- **All** — A command that exits non-zero counts as a failed step, and a web search row shows what was searched for.
+- **All** — A workflow's tokens count up while its agents' replies stream.
+- **All** — A `-p` run gets 100 tool rounds, retries like a scheduled run, and is told nobody is watching, with the tools it may not use left out.
+- **All** — The reminder to check edits covers patches, and only a clean, non-read-only command settles it; edits to .md or .txt files alone do not ask for it. A run nobody watches is told which files it changed after its last passing build or test.
+- **All** — Text from files and commands that addresses an AI gets a Vythea note, and the summary of dropped turns is marked as derived text.
+- **All** — Tool errors name the next step, and a command that prints nothing says so.
+- **All** — `VYTHEA_READ_TIMEOUT` sets how long a reply may stay silent.
+- **All** — A run is told before it ends which input files it never read, and a run nobody watches is told what is on PATH and in its folder.
+- **All** — Writes and edits name the file they changed; a CSV left with uneven rows gets a note; refused dangerous commands suggest a narrower one.
+- **All** — Files, command output, pages and MCP results lose characters nobody can see, with a note saying how many; `edit_file` finds text that differs only by them.
+- **All** — After untrusted content, risky calls are checked even under `--yes`; skills the model writes stay off until you switch them on, and installed skills reach the model cleaned and marked.
+- **All** — A helper's report comes quoted under a header; a skill being followed stays in view as old results are cleared, and a cleared result that was saved still names its file.
+- **All** — Reasoning models get the reply budget as `max_completion_tokens`; a full search page reaches the model whole; search names folders a `.gitignore` above the project hid.
+- **All** — Reading every page of an unchanged file counts as reading it whole; a picture too big to send is scaled down; a PDF `web_fetch` saves can be paged with `read_file`.
+- **All** — A goal's failing check command keeps the goal from being met, and `/review` covers new files and diffs from where the branch left.
+- **Terminal** — An unknown flag is an error, continuing stays in this folder's session, `--resume` under `-p` needs an id, and `-p` warns in Default mode that writes will be refused.
+- **All** — The agent is told when the session's mode changes, when you stopped its reply, which MCP servers are not ready, and, on long turns, the rules still in force (off unless chosen).
+- **All** — A tool that keeps failing is followed by a note to change approach; the goal check asks for evidence of each part.
+- **All** — Suggested commit messages follow the repository's own style.
+- **All** — Claude Code hooks Vythea does not run are left out with a notice; a window turn in a scheduled run is offered only what the run may call.
+- **Chat apps** — Slack shows bold, headings and links its own way.
+- **All** — Memory is saved only when you ask, unless you choose otherwise.
+- **All** — An edit that misses shows the closest text and what differs; a write that breaks a file's syntax says so.
+- **All** — A long page can be read past its first screen, and web answers come from the page that settles them, with its address.
+- **All** — Files a patch wrote show in Outputs and reach editors as edits; files the request says not to modify are named if a run changed them.
+- **All** — A blocked goal gets one more try, then pauses instead of being dropped.
+- **All** — Plan mode can keep every tool, so switching it keeps the cache (off unless chosen).
+- **All** — The gate reads a call's arguments under the names the tool accepts; `run_command` says how to read its result and that it has no keyboard.
+- **All** — The checklist tool says when to use it and what done means; a summary keeps your rules word for word and marks what is done. `/init` writes gotchas as short rules, without a tour of the folders.
+- **All** — Shorter, clearer instructions to the model: replies lead with the answer, say what counts as done, batch calls, ask first when unsure, and the user wins over a project file; fifteen tools now say each fact once, 490 tokens off every request.
+- **All** — Plan mode treats a request as a plan to make; helpers are told what they cannot do and report what they checked; non-Claude models take changing facts from a tool.
+- **All** — Text from outside that tries to instruct the agent is named, never copied; the untrusted-text rule is said once.
+- **All** — Auto mode allows project installs and local git but not pushes nobody asked for; an unwatched `--yes` run deletes a folder only inside its project; a redirect is judged where it lands.
+- **All** — Outputs are held to the values, keys and columns a request lists, and only code a folder can build or test sends a run back to check it.
+- **All** — Chat-app replies use lists, not tables; terminal replies use bold lines and lists.
+- **All** — Memory guidance is shorter and keeps facts, not orders or failures; saved skills keep steps that worked; a memory or skill change no longer rewrites the cached rules.
+- **App** — The window is built on GPUI Kit 0.7.1; panels and new messages ease in (still with reduced motion); Settings opens over the blurred window on X11 and macOS; Tab reaches every switch in Settings.
+- **App** — The title bar shows Vythea's name on the left instead of the session's, and About is shorter.
+### Fixed
+- **All** — A command that uploads a key file (curl, wget, scp, rsync) is refused in every mode, and .gnupg, .pgpass, .vault-token, .azure and gcloud settings count as secret.
+- **All** — An edit whose old text is missing says so instead of "already applied", plain text is no longer saved as a .docx, .xlsx, .pptx, .zip or .pdf, and a command that exits non-zero counts as failed.
+- **App** — Deleting the last session no longer crashes the window, a new session no longer inherits a deleted one's pictures, and a finished empty reply no longer shows Thinking forever.
+- **App** — New session goes to the top, even when it reuses an empty one.
+- **App** — Closing settings or the browser panel gives their pictures back to the GPU.
+- **App** — New session opens the empty one instead of piling up more, the last session in the sidebar scrolls fully into view, and right-clicking a session no longer draws a black halo.
+- **All** — Catastrophic commands, such as deleting your home folder, are refused whatever the approval setting.
+- **All** — Two copies of Vythea never mix their writes to one session, and a crash part way through a save costs one line, not the session.
+- **All** — Keys, settings and memory files are never silently reset or wiped by a read that failed, and a broken skills.json is never replaced by the defaults.
+- **All** — A session deleted in one copy of Vythea stays deleted, and a leftover lock file no longer lists a session twice.
+- **All** — Commands never hang on a child process they leave running, and output that is not valid UTF-8 survives.
+- **All** — `web_fetch` checks every address and redirect it follows.
+- **All** — Streamed tool calls are put together per call.
+- **All** — A project's AGENTS.md can no longer hang the app by linking to a device.
+- **Terminal** — `vythea -p` no longer keeps a processor core busy while a reply streams.
+- **All** — Two copies of Vythea starting at once never write into one session.
+- **Terminal** — Background jobs stop when the terminal exits.
+- **All** — Follow-ups and notices sent mid-turn keep the turn's request in view.
+- **All** — `/btw` shares the session's cache and leaves no stale locks.
+- **App** — The window opens again on a session that has messages.
+- **Terminal** — A bad update is put back, and a good one is kept.
+- **Terminal** — A Ctrl-C of `vythea -p` ends the command it was running.
+- **Terminal** — A `-p` run never installs a staged update or puts an old one back, and a SIGTERM or a closed terminal stops it as Ctrl-C does.
+- **All** — A command stopped at a terminal prompt is ended and says why, and a page's error answer comes back with what the page said.
+- **All** — An image edit on a gateway without the route points to a script instead of failing.
+- **Terminal** — `vythea -p` over stream-json no longer hangs on Windows when it starts.
+- **App** — Clicking the title bar's search box opens the palette again, instead of starting a window move.
+- **All** — A reply the provider cuts off part way is asked for again, and a call whose arguments are not JSON no longer ends the run.
+- **All** — Sandboxed commands start on Linux instead of failing to spawn.
+- **App** — The rewind question says plainly what goes and what is not undone, and card hints read properly in Paper and narrow windows.
+## [0.1.0-alpha.2] - 2026-09-27
+
+### Added
+- **App** — Right-click or hover a turn to copy, edit, retry, rewind or fork it.
+- **Terminal** — Take back or retry the last exchange, or branch a session.
+- **All** — A real browser: Vythea reads pages, clicks, types and takes screenshots. In the app it sits beside the chat, where you can watch it and use it yourself.
+- **App** — Each session has a browser of its own, or one shared by all, and it can be a cloud browser or Chrome on another machine.
+- **All** — Vythea updates itself: the app finds, checks and installs new versions, and `vythea update` does it in the terminal.
+- **All** — Search the web with your own search service.
+- **All** — MCP servers reached by URL, with headers such as a key; one-shot questions wait for MCP servers to start.
+- **All** — Rewind a session, and it stays rewound.
+- **Terminal** — The guide is a click away, from `/help`.
+- **All** — Vythea makes images, speech and video, and turns speech into text; pick which model makes each.
+- **All** — Vythea remembers: `SOUL.md` says who it is, `USER.md` and `MEMORY.md` hold what it knows about you and its own notes, and a project's `AGENTS.md` is read as its instructions.
+- **All** — Tools from MCP servers, set up in `mcp.json`.
+- **All** — Read a web page.
+- **All** — Search past sessions.
+- **Terminal** — `vythea`, the agent in a terminal: the conversation, tools, diffs, `/resume` by name, `/model`, `/effort`, `/thinking`, `/search`, `/plan`, `/jobs` and `/skills`.
+- **All** — One Vythea account for the app and the terminal: `/login`, `/whoami`, `/logout`, and an Account page in the app. Signing in happens on vythea.com.
+- **All** — Vythea's hosted models on your account, paid from your credit, with no key to paste.
+- **All** — Use every gateway you set up at once: the model list gathers models from Vythea and each gateway with a key, and a message goes to the gateway of the model you pick.
+- **All** — Gateways as a status list (signed in, connected, not set up, not running): Settings > Gateways in the app, `/gateways` in the terminal.
+- **All** — Teams: bill hosted models to a team's shared pool or to yourself, with `/team` in the terminal or Settings > Account in the app.
+- **All** — Effort, thinking and web search, where the gateway supports them.
+- **All** — Scheduled jobs, background jobs, a checklist, plan mode, and plugins that add tools.
+- **App** — Reach Vythea from Telegram and Discord, and scheduled jobs report to every channel.
+- **App** — The Artifacts and Skills pages.
+- **macOS** — macOS builds, with native fonts, paths and a proper .app.
+- **Linux** — Install and tray on Linux.
+- **All** — Install in one line, then a few questions.
+
+### Changed
+- **App** — Type while it answers, press Esc to stop, and deleting asks first.
+- **App** — The chat reads as a column, with your messages in cards and no flash when switching sessions.
+- **All** — Signing in no longer waits forever for the browser, ends on a page that looks like the website, and while waiting offers to open the page again, copy it or cancel.
+- **Windows**, **macOS** — Releases can be code signed, so Windows and macOS stop warning about an unknown publisher.
+- **All** — Old turns are summarized instead of forgotten when a conversation outgrows the model's window.
+- **All** — Model calls reuse one connection, and search skips files without a match before reading them.
+- **All** — Vythea is the default gateway, and the only hosted one.
+- **All** — Each session is its own file, so two copies of Vythea can run at once.
+- **All** — Settings saved on a gateway that is no longer offered move to your Vythea account.
+- **Terminal** — Questions are asked inside the input box, above where you type.
+- **All** — A turn that fails says why; tools work on gateways that rename them.
+
+### Fixed
+- **All** — Names with accents are no longer garbled by signing in.
+- **Linux**, **macOS** — Keys and sign-in files are readable by you only.
+- **All** — Your keys and sign-in stay out of the model's reach.
+- **Terminal** — Sessions keep their pins and todos when the terminal saves them.
+- **Windows** — Pastes arrive as one paste, commands run without flashing a console window, and the wheel scrolls.
+- **All** — Context no longer lost on large tool results; dangling tool calls are repaired.
+- **App** — Asking the Discord bot to read the chat no longer hangs the app.
+- **macOS** — The window's buttons stay visible when another app has focus.
+
+## [0.1.0-alpha.1] - 2026-09-18
+
+### Added
+- **App** — The first alpha of the Vythea desktop app: chat with an agent that can read, write and run things in your project, with approvals, sessions, and a choice of gateway (OpenAI, OpenRouter, Ollama or any OpenAI-compatible server).
+- **Windows** — Installs itself on first run, with a Start Menu entry and a tray icon.

@@ -1,0 +1,19 @@
+# Vythea documentation
+
+| Page | Covers |
+|---|---|
+| [Getting started](getting-started.md) | Install, setup, first message |
+| [App and terminal](app-and-terminal.md) | The window, CLI flags, slash commands, modes |
+| [Gateways and models](gateways.md) | Providers, hosted models, credit, teams |
+| [Tools](tools.md) | Files, shell, search, browser, media, helpers, memory |
+| [Extending](extending.md) | MCP, language servers, skills, plugins, hooks, ACP, chat apps |
+| [Plugins that run code](plugins.md) | JavaScript and Python plugins: tools, hooks, events, commands, settings, panels |
+| [Adding a provider](providers.md) | A new model provider: one folder and one line |
+| [Vythea Cloud](cloud.md) | Remote tasks, services, hosted web apps |
+| [Configuration](configuration.md) | Settings files and environment variables |
+| [Data and privacy](data-and-privacy.md) | What is stored where, and what leaves your machine |
+| [Architecture](architecture.md) | Crates and how a turn runs |
+| [Building](building.md) | Toolchains, checks, releases |
+| [Benchmarks](benchmarks.md) | Speed baseline and Harness-Bench results |
+
+The website guide at [vythea.com/docs](https://vythea.com/docs) is written for end users. These pages go deeper.

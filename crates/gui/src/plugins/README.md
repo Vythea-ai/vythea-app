@@ -1,0 +1,156 @@
+# Plugins
+
+A plugin is a self-contained integration that reacts to what happens in the app.
+The app never calls a plugin directly. It emits `AppEvent`s onto a bus; the
+registry fans each event out to every **enabled** plugin. Adding one is a single
+file here plus one line in `main` — nothing else in the app changes.
+
+## The `Plugin` trait
+
+```rust
+pub(crate) trait Plugin: 'static {
+    fn id(&self) -> &'static str;          // stable config key, never change once shipped
+    fn name(&self) -> &'static str;        // shown in Settings › Plugins
+    fn description(&self) -> &'static str; // one line, shown under the name
+    fn init(&self, cx: &mut App);          // called once at startup: spawn threads, set up
+    fn handle(&self, event: &AppEvent);    // react to an event; only called while enabled
+    fn set_enabled(&self, enabled: bool);  // turn on/off: tear down or resume your own work
+    fn enabled(&self) -> bool;             // current state
+    fn builtin(&self) -> bool { true }     // false for externally loaded plugins
+    fn default_enabled(&self) -> bool { true } // on or off before the user chooses
+    fn settings(&self, cx: &App) -> Option<AnyElement> { None } // your own UI, shown under the row
+    fn tools(&self) -> Vec<Arc<dyn Tool>> { Vec::new() }        // tools you give the agent
+    fn provider(&self) -> Option<&'static str> { None }         // a core provider you offer
+}
+```
+
+Rules of the trait:
+
+- **`handle` must be cheap and non-blocking.** It runs on the UI thread. Do real
+  work on a background thread you spawn in `init`, and send it messages over a
+  channel — see `discord.rs` for the pattern.
+- **`set_enabled` must actually stop the work.** When disabled, clear whatever
+  you put out into the world (a tray item, a presence, a socket) and ignore
+  events until re-enabled.
+- **`id` is forever.** It is the key in `plugin-switches.json`. Renaming it resets every
+  user's on/off choice.
+
+## Events
+
+`AppEvent` is the whole surface a plugin sees today:
+
+```rust
+pub(crate) enum AppEvent {
+    ChatStarted { model: String, title: String }, // a reply began
+    ChatIdle,                                      // the reply finished or failed
+    PresenceMode(PresenceMode),                    // user changed the Discord detail level
+}
+```
+
+To give plugins a new hook, add a variant here and emit it from the app with
+`plugins::emit(cx, AppEvent::…)`. Keep variants coarse and app-level (a session
+opened, a tool ran, the window focused), not UI details.
+
+## Hooks are trait methods
+
+There are no mixins in Rust. A hook is simply a method the app calls on your
+plugin. You get four kinds:
+
+- **Event hooks** — `handle(&AppEvent)` reacts to what the app is doing.
+- **UI hooks** — `settings(&App) -> Option<AnyElement>` lets you render your own
+  controls. The Plugins page shows whatever you return under your plugin's row.
+- **Tool hooks** — `tools() -> Vec<Arc<dyn Tool>>` adds tools the model can call.
+  They are offered only while your plugin is enabled, and withdrawn the moment
+  it is switched off. A plugin cannot take over the name of a built-in tool.
+- **Provider hooks** — `provider()` names a core provider whose `plugin()` is
+  your id. It is offered only while you are on, and the Plugins page shows
+  its account row (sign-in, status, usage) under yours. `chatgpt.rs` is one.
+
+A tool runs on a worker thread with no access to `App`, so everything it holds
+must be `Send + Sync` — share your plugin's state through an `Arc`, as
+`hello.rs` does with its reply counter. Implement `mutates()` if the tool
+changes anything outside Vythea; those are hidden in Plan mode. Implement
+`needs_approval()` if the user should confirm each call.
+
+Your plugin owns its state (an `Arc<AtomicBool>`, a struct behind a `Mutex`, a
+file on disk) and moves clones of it into the closures it builds in `settings`.
+An interactive closure runs later with `&mut App`; call `cx.refresh_windows()`
+after changing state so the page redraws. See `hello.rs` for a full example: it
+counts replies from an event hook and exposes a toggle from the UI hook.
+
+To add a new *kind* of hook (say, a button in the composer, or an entry in the
+title-bar menu), add a method to the `Plugin` trait with a default that returns
+nothing, then call it from that spot in the UI. Existing plugins keep compiling.
+
+## Lifecycle
+
+1. `main` builds the plugin list: `vec![Box::new(MyPlugin::new()), …]`.
+2. `plugins::init` reads `plugin-switches.json`, calls `set_enabled` with the saved
+   choice (`default_enabled` when there is none), then `init` on each, and
+   stores the registry.
+3. During the session the app calls `plugins::emit`; enabled plugins get `handle`.
+4. The Plugins settings page calls `plugins::set_enabled`, which flips the plugin
+   and rewrites `plugin-switches.json`.
+
+## State and storage
+
+- The on/off map lives in `plugin-switches.json` under the app data dir
+  (`%LOCALAPPDATA%\Vythea` on Windows). The app owns this file
+  (`plugins.json` beside it is the marketplace's); a plugin writes only its
+  own option keys there, through `providers::save_switch`.
+- A plugin that needs its own storage should write its own file in the same data
+  dir, keyed by its `id`, and read it in `init`.
+
+## Writing one
+
+```rust
+// src/plugins/hello.rs
+use super::{AppEvent, Plugin};
+use crate::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub(crate) struct Hello {
+    enabled: AtomicBool,
+}
+
+impl Hello {
+    pub(crate) fn new() -> Self {
+        Self { enabled: AtomicBool::new(true) }
+    }
+}
+
+impl Plugin for Hello {
+    fn id(&self) -> &'static str { "hello" }
+    fn name(&self) -> &'static str { "Hello" }
+    fn description(&self) -> &'static str { "Logs when a reply starts." }
+    fn init(&self, _cx: &mut App) {}
+    fn handle(&self, event: &AppEvent) {
+        if let AppEvent::ChatStarted { model, .. } = event {
+            eprintln!("hello: chatting with {model}");
+        }
+    }
+    fn set_enabled(&self, on: bool) { self.enabled.store(on, Ordering::Relaxed); }
+    fn enabled(&self) -> bool { self.enabled.load(Ordering::Relaxed) }
+}
+```
+
+Then register it in `src/main.rs`:
+
+```rust
+plugins::init(cx, vec![
+    Box::new(plugins::discord::DiscordPresence::new(plugins::PresenceMode::Detailed)),
+    Box::new(plugins::hello::Hello::new()),
+]);
+```
+
+Add `pub(crate) mod hello;` to `mod.rs`, and it shows up in Settings › Plugins
+with a toggle, a "Built in" badge, and persistence — no other wiring.
+
+## Plugins without Rust
+
+The plugins here are compiled into the window. A plugin that should not need
+Rust, Cargo or a rebuild -- most of them -- is written in JavaScript or Python
+instead and installed like any marketplace plugin: see
+[Plugins that run code](../../../../docs/plugins.md). Those live in core
+(`vythea_core::plugins::code`), so the terminal runs them too, and the
+window draws what they show in `src/ui/plugin_ui.rs`.
