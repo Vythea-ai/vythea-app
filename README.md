@@ -13,7 +13,7 @@
   <a href="https://github.com/Vythea-ai/vythea-app/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Vythea-ai/vythea-app?include_prereleases&label=release&color=1f4fd8"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-1f4fd8"></a>
   <a href="https://vythea.com"><img alt="vythea.com" src="https://img.shields.io/badge/web-vythea.com-00126b"></a>
-  <a href="https://vythea.com/vyth"><img alt="$VYTH CA" src="https://img.shields.io/badge/dynamic/json url=https%3A%2F%2Fvythea.com%2Fapi%2Fvyth&query=%24.badge&label=%24VYTH%20CA&color=1f4fd8&cacheSeconds=300"></a>
+    <a href="https://vythea.com/vyth"><img alt="$VYTH CA" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fvythea.com%2Fapi%2Fvyth&query=%24.badge&label=%24VYTH%20CA&color=1f4fd8&cacheSeconds=300"></a>
 </p>
 
 <p align="center">
