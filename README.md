@@ -6,7 +6,7 @@
 
 <p align="center">
   An agent with its own cloud and wallet. Prompt in, live link out.<br>
-  Rust, GPU rendered, no browser inside. <b>Alpha</b>: expect rough edges and breaking changes.
+  Rust, GPU rendered, no browser inside. <b>Beta</b>: expect rough edges and the odd breaking change.
 </p>
 
 <p align="center">

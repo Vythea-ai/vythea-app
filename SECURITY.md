@@ -19,4 +19,4 @@ Releases are signed: an update installs only when `latest.json` verifies against
 
 ## Supported versions
 
-Only the latest release gets fixes. Vythea is in alpha.
+Only the latest release gets fixes. Vythea is in beta.

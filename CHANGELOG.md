@@ -13,6 +13,11 @@ This file is also the App tab of https://vythea.com/changelog.
 
 ## [Unreleased]
 
+## [0.1.0-beta.1] - 2026-11-24
+
+- **All** — The first public beta, released from Vythea-ai/vythea-app: the window, the terminal and the gateway with eleven hosted models, downloads and the one-line installers from the GitHub release.
+- **App** — Telegram takes videos, round videos, GIFs and music files sent to the bot, and a chat kept in plan mode says how to let it use tools.
+
 ## [0.1.0-alpha.5.1] - 2026-11-11
 
 ### Added

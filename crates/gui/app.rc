@@ -14,11 +14,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Vythea LLC"
       VALUE "FileDescription", "Vythea"
-      VALUE "FileVersion", "0.1.0-alpha.1"
+      VALUE "FileVersion", "0.1.0-beta.1"
       VALUE "InternalName", "Vythea"
       VALUE "OriginalFilename", "Vythea.exe"
       VALUE "ProductName", "Vythea"
-      VALUE "ProductVersion", "0.1.0-alpha.1"
+      VALUE "ProductVersion", "0.1.0-beta.1"
       VALUE "LegalCopyright", "Copyright (c) 2026 Vythea LLC"
     END
   END
